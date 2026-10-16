@@ -7,7 +7,7 @@ from .keywords import MICRO_NICHES, get_micro_niches, resolve_micro_niches, _tok
 from .pitches import evidence_sources
 from .categories import assessment_profiles
 
-RULE_VERSION = "qualification-3"
+RULE_VERSION = "qualification-4"
 CHANNEL_TYPES = {"expert", "school", "brand", "news", "job_board", "aggregator", "store", "unknown"}
 TYPE_LABELS = {"expert": "Личный эксперт", "school": "Школа", "brand": "Бренд", "news": "Новости",
                "job_board": "Вакансии", "aggregator": "Агрегатор", "store": "Магазин", "unknown": "Не установлено"}
@@ -16,12 +16,37 @@ NEGATIVE = {
     "store": r"магазин|купить\s+шаблон|каталог\s+товар|скидк.{0,25}заказ|доставка\s+товар",
     "school": r"наша\s+школа|учебный\s+центр|онлайн.школа|команда\s+преподавател|^школа\s+",
     "brand": r"наша\s+компания|официальный\s+канал\s+компании|пресс.служб|корпоративный\s+канал",
-    "news": r"новости\s+(?:дня|индустрии|рынка)|новостной|дайджест|сообщает\s+(?:агентство|издание)",
-    "aggregator": r"склад\s+(?:файлов|плагинов|пресетов)|скачать\s+|подборка\s+(?:плагинов|файлов)|плагины\s+и\s+аддоны|plugins\s+and\s+addons",
+    "news": r"\bновости\b|новостн[а-я]*|дайджест|сообщает\s+(?:агентство|издание)|"
+            r"по\s+данным\s+(?:сми|агентства|издания|reuters|bloomberg|компании)|"
+            r"\b(?:openai|google|apple|meta|adobe|microsoft|компания|разработчики)\s+"
+            r"(?:[а-яa-z0-9-]+\s+){0,3}(?:выпустил[аи]?|представил[аи]?|анонсировал[аи]?|объявил[аи]?)\b|"
+            r"стало\s+известно|как\s+сообщает\b",
+    "aggregator": r"склад\s+(?:файлов|плагинов|пресетов)|скачать\s+|подборка\s+(?:плагинов|файлов|сервисов|нейросетей|инструментов)|"
+                  r"плагины\s+и\s+аддоны|plugins\s+and\s+addons|бизнес.идеи|"
+                  r"история\s+(?:компании|успеха)\s+|\bтоп[ -]+\d+\s+(?:сервисов|нейросетей|инструментов)",
 }
-POSITIVE = re.compile(r"\b(?:разбираю|объясняю|показываю|разработал[аи]?|сделал[аи]?|консультирую|провожу|запускаю)\b|"
+POSITIVE = re.compile(r"\b(?:разбираю|объясняю|показываю|консультирую|провожу|запускаю)\b|"
                       r"\b(?:мой|моя|мои|моём|моем)\s+(?:кейс|проект|клиент|опыт|курс|практик|работ)|"
                       r"\bя\s+(?:психолог|врач|стоматолог|дизайнер|монтаж[её]р|тренер|риелтор|репетитор|работаю|помогаю)", re.I)
+
+# First-person editorial phrasing alone does not establish professional practice.
+OWN_PRACTICE = re.compile(
+    r"\b(?:мой|моя|мои|моём|моем|моего|моей|моих)\s+"
+    r"(?:кейс|проект|клиент|пациент|опыт|курс|практик|работ|портфолио|ученик|гайд|шаблон|консультаци)|"
+    r"\bя\s+(?:психолог|врач|стоматолог|дизайнер|монтаж[её]р|тренер|риелтор|репетитор|"
+    r"разработчик|программист|предприниматель|основатель|сооснователь|техдир|работаю|консультирую|помогаю)|"
+    r"\bя\s+(?:создал[аи]?|разработал[аи]?|сделал[аи]?|спроектировал[аи]?|смонтировал[аи]?)\b|"
+    r"\b(?:разбираю|показываю|объясняю)[^.!?]{0,100}\b(?:на|в)\s+сво[её]м\s+(?:проект|кейс)|"
+    r"\b(?:консультирую|оказываю\s+услуги|беру\s+(?:заказы|проекты)|"
+    r"провожу\s+консультации|запускаю\s+(?:мини[ -]?)?курс)\b", re.I)
+
+PROFESSIONAL_CONTEXT = re.compile(
+    r"\b(?:кейс|проект|клиент|пациент|консультаци|практик|услуг|портфолио|"
+    r"предпринимател|основател|разработчик|программист|техдир)|"
+    r"\bя\s+(?:психолог|врач|стоматолог|дизайнер|монтаж[её]р|тренер|риелтор|репетитор)", re.I)
+
+CONTENT_LABELS = {**TYPE_LABELS, "expert": "Признаки авторской практики / разбора",
+                  "forwarded": "Пересылка", "unknown": "Недостаточно признаков"}
 
 
 def _proof(source, match=None):
@@ -102,29 +127,48 @@ def classify_content(row, topic="", niche_id="", micro_id="", category_ids=()):
         profiles = get_micro_niches(niche_id)
     else:
         profiles = resolve_micro_niches(topic)
-    positives = []
+    positives, personal_sources, source_roles = [], set(), {}
     for source in own:
-        match = POSITIVE.search(source["text"])
-        professional_context = re.search(r"\b(?:кейс|проект|клиент|пациент|консультаци|практик|услуг|портфолио)|"
-                                         r"\bя\s+(?:психолог|врач|стоматолог|дизайнер|монтаж[её]р|тренер|риелтор|репетитор)", source["text"], re.I)
-        topic_context = any(_contains(term, source["text"]) for profile in profiles for term in profile["match_terms"])
-        if match and (professional_context or topic_context):
+        text = source["text"]
+        practice = OWN_PRACTICE.search(text)
+        match = practice or POSITIVE.search(text)
+        topic_context = any(_contains(term, text) for profile in profiles for term in profile["match_terms"])
+        editorial = any(re.search(NEGATIVE[k], text, re.I) for k in ("news", "aggregator"))
+        if match and (PROFESSIONAL_CONTEXT.search(text) or topic_context) and (practice or not editorial):
             positives.append(_proof(source, match))
+            if practice:
+                personal_sources.add(source["id"])
+            source_roles[source["id"]] = ("expert", match)
     posts = [s for s in own if s["id"] != "description"]
     title = row.get("title", "")
     negatives, dominant = [], []
     for kind, pattern in NEGATIVE.items():
-        hits = [s for s in posts if re.search(pattern, s["text"], re.I)]
+        # An author may discuss a release in a client case or share their own files.
+        hits = [s for s in posts if re.search(pattern, s["text"], re.I)
+                and not (kind in ("news", "aggregator") and s["id"] in personal_sources)]
+        for source in hits:
+            source_roles.setdefault(source["id"], (kind, re.search(pattern, source["text"], re.I)))
         bio = next((s for s in own if s["id"] == "description" and re.search(pattern, s["text"], re.I)), None)
         explicit = bool(re.search(pattern, title, re.I) and bio)
         if explicit or (len(hits) >= 2 and len(hits) / max(len(posts), 1) >= .6):
             dominant.append(kind)
             negatives += [{"type": kind, **_proof(s, re.search(pattern, s["text"], re.I))}
                           for s in hits[:3] + ([bio] if bio else [])]
+    # Forwarded posts cannot supply practice evidence, and a feed dominated by
+    # forwarding is not promoted on the strength of a personal bio alone.
+    all_posts = [s for s in sources if s["id"] != "description"]
+    forwarded = [s for s in all_posts if s.get("forwarded")]
+    forwarded_dominates = len(forwarded) >= 3 and len(forwarded) / max(len(all_posts), 1) >= .6
+    if forwarded_dominates:
+        if 'aggregator' not in dominant:
+            dominant.append('aggregator')
+        negatives += [{"type": "aggregator", "signal": "forwarded", **_proof(s)} for s in forwarded[:3]]
+    has_expert_proof = len(positives) >= 2 and bool(personal_sources) and any(
+        p["source_id"] != "description" for p in positives)
     if dominant:
         channel_type = "unknown" if len(positives) >= 2 else dominant[0]
     else:
-        channel_type = "expert" if len(positives) >= 2 else "unknown"
+        channel_type = "expert" if has_expert_proof else "unknown"
     confidence = "high" if channel_type not in ("unknown", "expert") else "medium" if channel_type == "expert" else "low"
     relevance_evidence, best_count = [], 0
     for profile in profiles:
@@ -152,13 +196,31 @@ def classify_content(row, topic="", niche_id="", micro_id="", category_ids=()):
     reasons = []
     if channel_type == "unknown":
         reasons.append("Недостаточно независимых признаков личной практики или признаки конфликтуют")
+        if len(positives) >= 2 and not personal_sources:
+            reasons.append("Авторские формулировки есть, но личная практика не установлена")
     elif channel_type != "expert":
         reasons.append(f"Нецелевой тип: {TYPE_LABELS[channel_type]}")
     if relevance != "matched":
         reasons.append("Тематика не совпадает" if relevance == "mismatch" else "Недостаточно признаков соответствия узкой теме")
+    if dominant:
+        reasons.append("Преобладают нецелевые признаки: " + ", ".join(TYPE_LABELS[k] for k in dominant))
+    if forwarded_dominates:
+        reasons.append(f"Преобладают пересылки: {len(forwarded)}/{len(all_posts)} текстовых постов")
+    post_roles = []
+    for source in sources:
+        if source["id"] == "description":
+            continue
+        kind, match = ("forwarded", None) if source.get("forwarded") else source_roles.get(source["id"], ("unknown", None))
+        post_roles.append({"role": kind, **_proof(source, match)})
+    summary = {"text_posts": len(post_roles), "independent_own_posts": len(posts),
+               "forwarded_posts": sum(s.get("forwarded", False) for s in sources if s["id"] != "description"),
+               "expert_evidence_posts": sum(s["id"] in source_roles and source_roles[s["id"]][0] == "expert" for s in posts),
+               "personal_practice_posts": sum(s["id"] in personal_sources for s in posts),
+               "dominant_non_target_types": dominant}
     return {"channel_type": channel_type, "confidence": confidence, "positive_evidence": positives,
             "negative_evidence": negatives, "relevance": relevance, "relevance_evidence": relevance_evidence,
-            "reasons": reasons, "rule_version": RULE_VERSION}
+            "reasons": reasons, "rule_version": RULE_VERSION,
+            "content_summary": summary, "post_roles": post_roles}
 
 
 def qualify(row, topic="", niche_id="", micro_id="", category_ids=()):

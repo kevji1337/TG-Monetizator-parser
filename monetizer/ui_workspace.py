@@ -6,14 +6,30 @@ import streamlit as st
 from .batch import create_batch, batch_zip, batch_prompt, preview_response, import_response
 from .export import csv_bytes, xlsx_bytes
 from .repository import WORK_STATUSES
-from .qualification import TYPE_LABELS
+from .qualification import TYPE_LABELS, CONTENT_LABELS
 from .ui_quality import quality_panel
 
 
 def show_evidence(row):
     st.caption("Тип: " + TYPE_LABELS.get(row.get("channel_type"), "Не установлено") + " · Тематика: " + row.get("relevance", "unknown"))
+    st.link_button("Посмотреть публичную ленту Telegram", 'https://t.me/s/' + row['username'].lstrip('@'))
+    classification = row.get('classification', {})
+    summary = classification.get('content_summary')
+    if summary:
+        st.caption(f"Текстовых постов: {summary['text_posts']} · независимых без пересылок: {summary['independent_own_posts']} · "
+                   f"с признаками авторской практики / разбора: {summary['expert_evidence_posts']} · "
+                   f"пересылок: {summary['forwarded_posts']}")
+    with st.expander('Разбор публикаций Telegram'):
+        st.caption('Признаки определены локальными правилами по тексту. Отсутствие метки пересылки не подтверждает авторство. Фото, аудио и видео не распознаются.')
+        for item in classification.get('post_roles', []):
+            st.write(CONTENT_LABELS.get(item['role'], item['role']))
+            st.text(item['quote'])
+            if item.get('url'):
+                st.link_button('Публикация ' + item['source_id'], item['url'])
+        if not classification.get('post_roles'):
+            st.info('В этом отчёте ещё нет разбора публикаций. Обновите тексты канала или откройте запуск для пересчёта.')
     with st.expander("Основания отбора и цитаты"):
-        st.json(row.get("classification", {"comment": "Старый отчёт без оценки содержания"}))
+        st.json(classification or {"comment": "Старый отчёт без оценки содержания"})
     with st.expander("Предложения автора"):
         offers = row.get("offers", [])
         if not offers:
@@ -36,9 +52,12 @@ def database_panel(runner, running):
         return
     status_filter = st.multiselect("Рабочие статусы", list(WORK_STATUSES), format_func=WORK_STATUSES.get)
     search = st.text_input("Поиск в базе", key="database_search")
+    hide_non_target = st.checkbox('Скрыть нецелевые типы каналов', value=True, key='database_hide_non_target')
     visible = [r for r in rows if (not status_filter or r["work_status"] in status_filter)
+               and (not hide_non_target or (r.get('channel_type') or 'unknown') in ('expert', 'unknown'))
                and (not search or search.casefold() in (r.get("title", "") + r["username"]).casefold())]
     st.dataframe(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"), "Отбор": r.get("verdict"),
+                               "Тип": TYPE_LABELS.get(r.get('channel_type'), 'Не установлено'),
                                "Работа": WORK_STATUSES[r["work_status"]], "Заметка": r["notes"]} for r in visible]), hide_index=True, width="stretch")
     if not visible:
         return

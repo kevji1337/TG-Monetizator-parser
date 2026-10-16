@@ -172,13 +172,13 @@ def parse_channel_html(html, username, settings=None, now=None):
     for post in dated:
         text_node = post["node"].select_one(".tgme_widget_message_text")
         text = re.sub(r"\s+", " ", text_node.get_text(" ", strip=True)) if text_node else ""
-        if len(text) >= 20:
+        system_text = re.fullmatch(r"(?:pinned (?:a |the )?(?:photo|video|message)|"
+                                  r"закрепил[аи]? (?:фотографию|видео|сообщение))[.!]?", text, re.I)
+        if len(text) >= 20 and not system_text:
             samples.append({"id": post["id"], "url": f"https://t.me/{post['id']}",
-                            "date": post["date"].isoformat(), "text": text[:1800],
+                            "date": post["date"].isoformat(), "text": text[:4000],
                             "forwarded": bool(post["node"].select_one(".tgme_widget_message_forwarded_from")),
                             "links": _links([text_node])[:8]})
-        if len(samples) >= 8:
-            break
     row = {"username": "@" + username, "title": title, "link": f"https://t.me/{username}",
            "subs": subs, "avg_views": avg, "median_views": median, "view_ratio": ratio, "norm": norm,
            "freq": freq, "avg_gap_days": round(interval, 2) if interval is not None else None,

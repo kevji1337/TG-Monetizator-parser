@@ -18,6 +18,7 @@ from monetizer.pitches import direct_scenario
 from monetizer.runner import JobRunner, sorted_rows
 from monetizer.settings import Settings
 from monetizer.ui_workspace import render_workspace, show_evidence
+from monetizer.qualification import TYPE_LABELS
 from monetizer.ui_quality import profile_panel
 from monetizer.profile import profile_version
 from monetizer.diagnostics import logger
@@ -150,6 +151,7 @@ with st.sidebar:
         except (ValueError, RuntimeError, OSError) as exc:
             st.error(str(exc))
     st.caption("TGStat открывается в видимом Chrome. При запросе проверки выполните её в этом окне.")
+    st.caption('После TGStat робот читает описание и тексты публичной ленты t.me/s, без входа в Telegram. Новости, агрегаторы и другие нецелевые типы не засчитываются в цель.')
 
 
 @st.fragment(run_every="2s")
@@ -224,13 +226,17 @@ def results_panel():
     only_green = filter_columns[0].checkbox("Только зелёные")
     only_contact = filter_columns[1].checkbox("С кандидатом контакта")
     search = filter_columns[2].text_input("Поиск в результатах", placeholder="Название или @username")
+    hide_non_target = st.checkbox('Скрыть новости, агрегаторы, школы, бренды, магазины и доски вакансий', value=True)
     selected = [r for r in rows if (not only_green or r.get("status") in ("top", "recommended"))
+                and (not hide_non_target or (r.get('channel_type') or 'unknown') in ('expert', 'unknown'))
                 and (not only_contact or r.get("author_contact"))
                 and (not search or search.casefold() in f"{r.get('title', '')} {r['username']}".casefold())]
     st.caption(f"Показано {len(selected)} из {len(rows)}. Скачивание учитывает фильтры.")
-    visible = ["verdict", "title", "username", "subs", "avg_views", "median_views", "view_ratio", "freq",
+    st.caption('Неопределённые каналы остаются с жёлтой меткой; они не входят в цель поиска. Снимите фильтр, чтобы увидеть отклонённые типы и основания.')
+    visible = ["verdict", "channel_type", "title", "username", "subs", "avg_views", "median_views", "view_ratio", "freq",
                "last_post", "youtube", "instagram", "author_contact", "reasons", "link"]
-    frame = pd.DataFrame([{COLUMNS[k]: r.get(k) for k in visible} for r in selected])
+    frame = pd.DataFrame([{COLUMNS[k]: TYPE_LABELS.get(r.get(k), 'Не установлено') if k == 'channel_type' else r.get(k)
+                           for k in visible} for r in selected], columns=[COLUMNS[k] for k in visible])
     st.dataframe(frame, hide_index=True, width="stretch",
                  column_config={COLUMNS[k]: st.column_config.LinkColumn(COLUMNS[k]) for k in ("link", "youtube", "instagram")})
     if selected:
