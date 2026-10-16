@@ -3,7 +3,8 @@ import argparse
 import sys
 
 from monetizer.audit import audit_channel_by_methodology, audit_channel_via_web
-from monetizer.keywords import COURSE_NICHES, expand_keywords
+from monetizer.keywords import MICRO_NICHES
+from monetizer.categories import load_categories
 from monetizer.runner import JobRunner
 from monetizer.search import search_tgstat_by_methodology
 from monetizer.settings import Settings
@@ -13,43 +14,56 @@ def main():
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Поиск и аудит публичных Telegram-каналов")
-    parser.add_argument("--niche", help="ID ниши из monetizer/data/keyword_catalog.json")
-    parser.add_argument("--topic", help="Своя тема")
+    parser.add_argument('--categories', '--category', nargs='+', help='ID или точные названия тематик самого TGStat')
+    parser.add_argument('--list-categories', action='store_true', help='Показать сохранённый список тематик TGStat')
+    parser.add_argument('--niche', help=argparse.SUPPRESS)  # Do not silently reinterpret old internal IDs as TGStat IDs.
+    parser.add_argument('--topic', help=argparse.SUPPRESS)
     parser.add_argument("--count", type=int, default=30)
-    parser.add_argument("--keys", type=int, default=12)
-    parser.add_argument("--micro", help="ID узкого направления из каталога")
+    parser.add_argument("--micro", help="Необязательный фокус аудита по содержанию; не передаётся в поиск TGStat")
     parser.add_argument("--max-audits", type=int, default=0, help="0 = десятикратный лимит от цели")
     parser.add_argument("--max-minutes", type=float, default=60)
     parser.add_argument("--include-known", action="store_true", help="Включать ранее обработанные каналы, используя кэш")
     parser.add_argument("--channels", nargs="+", help="Аудит @username без TGStat")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    categories = load_categories()['categories']
+    if args.list_categories:
+        for category in categories:
+            print(f"[{category['id']}] {category['title']}")
+        return 0
+    if args.niche or args.topic:
+        parser.error('Новый поиск работает по тематикам TGStat: используйте --categories. Список: --list-categories')
+    if args.micro and args.micro not in MICRO_NICHES:
+        parser.error('Неизвестная специализация для аудита')
     runner = JobRunner()
     try:
         if args.resume:
             runner.start(resume=True)
         else:
-            niche_id, topic = args.niche, args.topic or ""
-            if not niche_id and not topic and not args.channels:
-                print("Выберите нишу:")
-                for niche in COURSE_NICHES:
-                    print(f"[{niche['id']}] {niche['title']}")
-                print("[0] Своя тема")
-                niche_id = input("Ниша [Enter = 1]: ").strip() or "1"
-                if niche_id == "0":
-                    topic = input("Тема: ").strip()
-                count = input("Сколько уникальных каналов [Enter = 30]: ").strip()
+            selected = args.categories or []
+            if not selected and not args.channels:
+                print('Выберите тематики TGStat:')
+                for category in categories:
+                    print(f"[{category['id']}] {category['title']}")
+                selected = (input('ID тематик через пробел [Enter = 34, Дизайн]: ').strip() or '34').split()
+                count = input("Сколько подходящих каналов [Enter = 30]: ").strip()
                 if count:
                     args.count = int(count)
-            niche = next((n for n in COURSE_NICHES if n["id"] == niche_id), None)
-            if niche_id and niche_id != "0" and not niche:
-                raise ValueError("Неизвестный ID ниши")
-            title = niche["title"] if niche else topic or "Заданные каналы"
-            queries = expand_keywords(topic, niche_id, args.keys, args.micro)
-            if not args.channels:
-                print("Поисковые запросы: " + "; ".join(queries))
+            resolved = []
+            for value in selected:
+                category = next((c for c in categories if value == c['id'] or value.casefold() == c['title'].casefold()), None)
+                if category is None:
+                    raise ValueError('Неизвестная тематика TGStat: ' + value)
+                if category not in resolved:
+                    resolved.append(category)
+            title = '; '.join(c['title'] for c in resolved) or 'Заданные каналы'
+            if args.micro:
+                title += ' · ' + MICRO_NICHES[args.micro]['title']
+            print('Тематики TGStat: ' + title + '. Текстовые запросы не используются.')
             runner.start(Settings(target_count=args.count, max_audits=args.max_audits, max_minutes=args.max_minutes,
-                                  new_only=not args.include_known, niche_id=niche_id if niche else "", micro_id=args.micro or ""), queries, title, args.channels)
+                                  new_only=not args.include_known, micro_id=args.micro or '',
+                                  search_mode='manual' if args.channels else 'categories', category_ids=[c['id'] for c in resolved]),
+                         niche=title, usernames=args.channels)
         last_log = None
         while runner.thread.is_alive():
             snapshot = runner.snapshot()

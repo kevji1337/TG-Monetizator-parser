@@ -5,8 +5,9 @@ from functools import lru_cache
 
 from .keywords import MICRO_NICHES, get_micro_niches, resolve_micro_niches, _tokens, _same_word
 from .pitches import evidence_sources
+from .categories import assessment_profiles
 
-RULE_VERSION = "qualification-2"
+RULE_VERSION = "qualification-3"
 CHANNEL_TYPES = {"expert", "school", "brand", "news", "job_board", "aggregator", "store", "unknown"}
 TYPE_LABELS = {"expert": "Личный эксперт", "school": "Школа", "brand": "Бренд", "news": "Новости",
                "job_board": "Вакансии", "aggregator": "Агрегатор", "store": "Магазин", "unknown": "Не установлено"}
@@ -90,11 +91,13 @@ def extract_offers(row):
     return result
 
 
-def classify_content(row, topic="", niche_id="", micro_id=""):
+def classify_content(row, topic="", niche_id="", micro_id="", category_ids=()):
     sources = evidence_sources(row)
     own = _independent_sources(sources)
     if micro_id:
         profiles = [MICRO_NICHES[micro_id]] if micro_id in MICRO_NICHES else []
+    elif category_ids:
+        profiles = assessment_profiles(category_ids)
     elif niche_id:
         profiles = get_micro_niches(niche_id)
     else:
@@ -143,7 +146,7 @@ def classify_content(row, topic="", niche_id="", micro_id=""):
             if other["id"] not in target_ids and sum(any(_contains(t, s["text"]) for s in own) for t in other["match_terms"]) >= 2:
                 relevance = "mismatch"
                 break
-    if not profiles and len(_tokens(topic)) >= 2 and sum(_contains(topic, s["text"]) for s in own) >= 2:
+    if not category_ids and not profiles and len(_tokens(topic)) >= 2 and sum(_contains(topic, s["text"]) for s in own) >= 2:
         relevance = "matched"
         relevance_evidence = [{"term": topic, **_proof(s)} for s in own if _contains(topic, s["text"])][:3]
     reasons = []
@@ -158,14 +161,16 @@ def classify_content(row, topic="", niche_id="", micro_id=""):
             "reasons": reasons, "rule_version": RULE_VERSION}
 
 
-def qualify(row, topic="", niche_id="", micro_id=""):
+def qualify(row, topic="", niche_id="", micro_id="", category_ids=()):
     row = copy.deepcopy(row)
     row["analysis_context"] = {"topic": topic, "niche_id": niche_id, "micro_id": micro_id}
+    if category_ids:
+        row['analysis_context']['category_ids'] = list(category_ids)
     metric_status = row.get("metric_status", row.get("status", "error"))
     metric_reasons = row.get("metric_reasons", row.get("reasons", ""))
     row["metric_status"], row["metric_reasons"] = metric_status, metric_reasons
     row["metrics"] = {k: row.get(k) for k in ("subs", "avg_views", "median_views", "view_ratio", "norm", "avg_gap_days", "days_since_last")}
-    classification = classify_content(row, topic, niche_id, micro_id)
+    classification = classify_content(row, topic, niche_id, micro_id, category_ids)
     row.update(classification=classification, channel_type=classification["channel_type"],
                relevance=classification["relevance"], offers=extract_offers(row), producer_status="Не установлено")
     row["offers_summary"] = "; ".join(dict.fromkeys(o["kind"] for o in row["offers"])) or "Не найдено в просмотренной выборке"

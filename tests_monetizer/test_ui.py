@@ -25,23 +25,54 @@ class InterfaceTests(unittest.TestCase):
         self.directory.cleanup()
         st.cache_resource.clear()
 
-    def test_initial_page_and_custom_keywords(self):
+    def test_initial_page_uses_real_tgstat_categories(self):
         app = AppTest.from_file(str(self.app_path)).run(timeout=15)
         self.assertEqual(len(app.exception), 0)
-        app.sidebar.selectbox[0].select("custom").run()
-        next(t for t in app.sidebar.text_input if t.label == "Ваша тема").set_value("дизайн").run()
-        self.assertIn("framer", next(t for t in app.sidebar.text_area if t.label == "Запросы — можно изменить").value.casefold())
+        choices = next(m for m in app.multiselect if m.label == 'Тематики TGStat')
+        self.assertEqual(len(choices.options), 47)
+        self.assertIn('Дизайн', choices.options)
+        self.assertIn('Медицина', choices.options)
+        self.assertFalse(any(t.label == 'Запросы — можно изменить' for t in app.text_area))
         self.assertEqual(len(app.exception), 0)
 
-    def test_custom_landscape_topic_excludes_web_tools(self):
+    def test_category_scope_limits_optional_audit_focus(self):
         app = AppTest.from_file(str(self.app_path)).run(timeout=15)
-        app.sidebar.selectbox[0].select("custom").run()
-        next(t for t in app.sidebar.text_input if t.label == "Ваша тема").set_value("ландшафтный дизайн").run()
-        text = next(t for t in app.sidebar.text_area if t.label == "Запросы — можно изменить").value.casefold()
-        self.assertIn("дендроплан", text)
-        self.assertNotIn("framer", text)
-        self.assertNotIn("tilda", text)
+        next(m for m in app.multiselect if m.label == 'Тематики TGStat').set_value(['28']).run()
+        focus = next(s for s in app.selectbox if s.label == 'Проверять конкретную специализацию')
+        self.assertTrue(any('Стоматолог' in option or 'стоматолог' in option for option in focus.options))
+        self.assertFalse(any('UX' in option or 'ландшафт' in option.casefold() for option in focus.options))
         self.assertEqual(len(app.exception), 0)
+
+    def test_screenshot_defaults_and_edits_reach_runner(self):
+        with patch.object(self.runner, 'start') as start:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            self.assertEqual(next(m for m in app.multiselect if m.label == 'Страна канала').value, [])
+            self.assertEqual(next(m for m in app.multiselect if m.label == 'Язык канала').value, ['3'])
+            self.assertEqual(next(s for s in app.selectbox if s.label == 'Тип канала').value, '')
+            self.assertEqual(tuple(next(s for s in app.slider if s.label == 'Возраст канала, месяцев').value), (12, 120))
+            self.assertEqual(tuple(next(s for s in app.slider if s.label == 'Уровень вовлечённости ERR, %').value), (10, 100))
+            next(s for s in app.slider if s.label == 'Возраст канала, месяцев').set_value((24, 60)).run()
+            next(s for s in app.slider if s.label == 'Уровень вовлечённости ERR, %').set_value((15, 80)).run()
+            next(n for n in app.number_input if n.label == 'Подписчики от').set_value(5000).run()
+            next(n for n in app.number_input if n.label == 'Индекс цитирования до').set_value(25.0).run()
+            next(b for b in app.button if b.label == 'Начать поиск и аудит').click().run()
+            settings = start.call_args.args[0]
+            self.assertEqual(settings.category_ids, ('34',))
+            self.assertEqual(settings.search_mode, 'categories')
+            self.assertEqual((settings.min_age_months, settings.max_age_months), (24, 60))
+            self.assertEqual((settings.min_err, settings.max_err), (15, 80))
+            self.assertEqual(settings.min_subs, 5000)
+            self.assertEqual(settings.max_ci, 25.0)
+            self.assertNotIn('queries', start.call_args.kwargs)
+            self.assertEqual(len(app.exception), 0)
+
+    def test_empty_category_selection_does_not_start_search(self):
+        with patch.object(self.runner, 'start') as start:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(m for m in app.multiselect if m.label == 'Тематики TGStat').set_value([]).run()
+            next(b for b in app.button if b.label == 'Начать поиск и аудит').click().run()
+            start.assert_not_called()
+            self.assertTrue(any('тематику' in error.value for error in app.error))
 
     def test_build_source_based_pitch_requires_confirmation(self):
         from test_editorial import channel_row

@@ -8,7 +8,9 @@ import streamlit as st
 
 from monetizer.export import COLUMNS, csv_bytes, xlsx_bytes
 from monetizer.audit import WebAuditor
-from monetizer.keywords import COURSE_NICHES, expand_keywords, unique_queries, get_micro_niches, resolve_micro_niches, MICRO_NICHES, CATALOG_VERSION
+from monetizer.keywords import MICRO_NICHES
+from monetizer.categories import load_categories, category_label, assessment_profiles
+from monetizer.search import refresh_categories
 from monetizer.pitches import (generate_pitch, compose_pitch, evidence_sources, suggest_scenarios,
                               chatgpt_prompt, SCENARIOS, PLAYBOOK_VERSION)
 from monetizer.pitches import direct_scenario
@@ -38,45 +40,70 @@ st.caption("Поиск публичных Telegram-каналов эксперт
 
 with st.sidebar:
     st.header("Новый поиск")
-    mode = st.radio("Источник", ["TGStat — поиск по нише", "Список каналов — только аудит"])
-    ids = [n["id"] for n in COURSE_NICHES] + ["custom"]
-    labels = {n["id"]: n["title"] for n in COURSE_NICHES} | {"custom": "Своя тема"}
-    niche_id = st.selectbox("Ниша", ids, format_func=lambda value: labels[value])
-    topic = st.text_input("Ваша тема", placeholder="Например: дизайн презентаций") if niche_id == "custom" else labels[niche_id]
-    micros = get_micro_niches(niche_id) if niche_id != "custom" else get_micro_niches()
-    micro_id = st.selectbox("Узкое направление", [""] + [m["id"] for m in micros],
-                            format_func=lambda value: MICRO_NICHES[value]["title"] if value else
-                            ("Автоматически по вашей теме" if niche_id == "custom" else "Все направления ниши"))
-    key_count = st.slider("Максимум поисковых запросов", 3, 40, 12)
-    seed = (niche_id, topic, key_count, micro_id, CATALOG_VERSION)
-    if st.session_state.get("keyword_seed") != seed:
-        st.session_state["keyword_seed"] = seed
-        st.session_state["keyword_text"] = "\n".join(expand_keywords(topic, niche_id, key_count, micro_id))
+    mode = st.radio("Источник", ["TGStat — каталог тематик", "Список каналов — только аудит"])
+    snapshot = load_categories()
+    labels = {c['id']: c['title'] for c in snapshot['categories']}
+    previous = st.session_state.get('tgstat_category_ids')
+    if previous is not None and any(c not in labels for c in previous):
+        st.session_state['tgstat_category_ids'] = [c for c in previous if c in labels]
+    category_ids = st.multiselect('Тематики TGStat', list(labels), default=['34'] if '34' in labels else [],
+                                  format_func=labels.get, key='tgstat_category_ids',
+                                  placeholder='Выберите одну или несколько тематик')
+    topic = '; '.join(labels[c] for c in category_ids)
+    micro_id = ''
     if mode.startswith("TGStat"):
-        st.text_area("Запросы — можно изменить", key="keyword_text", height=200)
         channels_text = ""
-        matched = [MICRO_NICHES[micro_id]] if micro_id else (resolve_micro_niches(topic) if niche_id == "custom" else micros)
-        total_queries = sum(len(m['discovery_queries']) for m in MICRO_NICHES.values())
-        st.caption(f"Каталог: {len(MICRO_NICHES)} направлений и {total_queries} запросов. Выбрано запросов: {len(st.session_state['keyword_text'].splitlines())}.")
-        if matched:
-            st.caption("Семантика: " + "; ".join(m["title"] for m in matched))
-            with st.expander("Границы темы и признаки эксперта"):
-                for micro in matched:
-                    st.markdown(f"**{micro['title']}**")
-                    st.write(micro["disambiguation"])
-                    st.write("Ищем: " + "; ".join(micro["expert_signals"]))
-                    st.write("Проверяем вручную: " + "; ".join(micro["non_target_signals"]))
-        elif topic:
-            st.info("Для этой темы нет точного направления в каталоге. Оставлен исходный запрос: добавьте свои ключи или выберите направление вручную.")
+        st.caption('Поиск по выбранным тематикам самого TGStat. Поле текстового запроса остаётся пустым.')
+        with st.expander('Список тематик'):
+            st.caption(f"Тематик: {len(labels)}. Список прочитан с TGStat: {snapshot['observed_at'][:10]}.")
+            st.caption('При поиске ID проверяется по форме сайта. Обновление списка открывает Chrome только по этой кнопке.')
+            if st.button('Обновить тематики с TGStat', disabled=runner.snapshot()['status'] in ('running', 'stopping')):
+                try:
+                    with st.spinner('Читаю список тематик TGStat в Chrome…'):
+                        refresh_categories()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f'Не удалось обновить тематики: {exc}')
     else:
         channels_text = st.text_area("@username или ссылки t.me — по одному на строку", height=150)
+    with st.expander('Фокус аудита — необязательно'):
+        st.caption('Это дополнительный отбор по содержанию после сбора. Он не меняет тематику TGStat и не отправляет слова в поиск.')
+        profiles = assessment_profiles(category_ids) if category_ids else list(MICRO_NICHES.values())
+        micro_id = st.selectbox('Проверять конкретную специализацию', [''] + [m['id'] for m in profiles],
+                                format_func=lambda value: MICRO_NICHES[value]['title'] if value else 'Все специализации выбранных тематик')
     count = st.number_input("Цель: подходящих каналов", 1, 1000, 30, step=1)
     new_only = st.checkbox("Искать только новые каналы", value=True, disabled=not mode.startswith("TGStat"))
     login_pause = st.checkbox("Дать минуту на ручной вход в TGStat", disabled=not mode.startswith("TGStat"))
-    with st.expander("Критерии и скорость"):
+    with st.expander('Фильтры TGStat', expanded=True):
+        st.caption('Применяются при поиске на TGStat. Для готового списка каналов работают критерии аудита ниже.')
+        country_labels = {c['id']: c['title'] for c in snapshot['countries']}
+        language_labels = {c['id']: c['title'] for c in snapshot['languages']}
+        countries = st.multiselect('Страна канала', list(country_labels), format_func=country_labels.get,
+                                   placeholder='Любая страна')
+        languages = st.multiselect('Язык канала', list(language_labels), default=['3'] if '3' in language_labels else [], format_func=language_labels.get,
+                                   placeholder='Любой язык')
+        channel_types = {'': 'Любой', 'public': 'Публичный', 'private': 'Приватный'}
+        channel_type = st.selectbox('Тип канала', list(channel_types), format_func=channel_types.get)
+        age = st.slider('Возраст канала, месяцев', 0, 120, (12, 120))
+        err = st.slider('Уровень вовлечённости ERR, %', 0, 100, (10, 100))
+        st.caption('Крайние значения 120 месяцев и 100% — это 120+ и 100+ в форме TGStat, без верхнего ограничения.')
+        er = st.slider('Уровень вовлечённости ER от, %', 0.0, 10.0, 0.0, step=.5)
+        male = st.slider('Мужская аудитория от, %', 0, 90, 0, step=5)
+        female = st.slider('Женская аудитория от, %', 0, 90, 0, step=5)
         min_subs = st.number_input("Подписчики от", 1, 100_000_000, 3000)
         max_subs = st.number_input("Подписчики до", 1, 100_000_000, 30000)
-        daily = st.number_input("Суточный охват TGStat от", 0, 10_000_000, 300)
+        tgstat_views_from = st.number_input('Средний охват поста TGStat от', min_value=0, value=None, placeholder='Без ограничения')
+        tgstat_views_to = st.number_input('Средний охват поста TGStat до', min_value=0, value=None, placeholder='Без ограничения')
+        daily = st.number_input('Средний охват поста за 24 часа от', 0, 10_000_000, 300)
+        daily_to = st.number_input('Средний охват поста за 24 часа до', min_value=0, value=None, placeholder='Без ограничения')
+        ci_from = st.number_input('Индекс цитирования от', min_value=0.0, value=None, step=.1, placeholder='Без ограничения')
+        ci_to = st.number_input('Индекс цитирования до', min_value=0.0, value=None, step=.1, placeholder='Без ограничения')
+        exclude_dead = st.checkbox('Скрыть мёртвые каналы', value=True)
+        exclude_scam = st.checkbox('Без SCAM/FAKE', value=True)
+        exclude_red = st.checkbox('Без красной метки', value=True)
+        st.caption('Приватные каналы без публичного username или превью t.me/s нельзя проверить этим аудитором.')
+    with st.expander("Критерии и скорость"):
+        st.caption('Дополнительные критерии аудита публичного превью; они отделены от фильтров поиска TGStat.')
         views = st.number_input("Средние просмотры поста от", 0, 10_000_000, 300)
         mature = st.number_input("Возраст поста для просмотров, часов", 0, 168, 24)
         gap = st.number_input("Максимальный интервал публикаций, дней", 1.0, 14.0, 4.0, step=.5)
@@ -90,12 +117,22 @@ with st.sidebar:
                                 min_avg_views=views, target_count=count, mature_hours=mature,
                                 max_gap_days=gap, workers=workers, requests_per_second=rate,
                                 login_wait_seconds=60 if login_pause else 0, max_audits=audit_budget,
-                                max_minutes=time_limit, new_only=new_only, niche_id=niche_id if niche_id != "custom" else "", micro_id=micro_id)
+                                max_minutes=time_limit, new_only=new_only, micro_id=micro_id,
+                                search_mode='categories' if mode.startswith('TGStat') else 'manual', category_ids=category_ids,
+                                country_ids=countries, language_ids=languages, channel_type=channel_type,
+                                min_age_months=age[0], max_age_months=age[1] if age[1] < 120 else None,
+                                min_err=err[0], max_err=err[1] if err[1] < 100 else None,
+                                min_er=er, min_male=male, min_female=female,
+                                tgstat_min_avg_reach=tgstat_views_from, tgstat_max_avg_reach=tgstat_views_to,
+                                max_daily_reach=daily_to, min_ci=ci_from, max_ci=ci_to,
+                                exclude_dead=exclude_dead, exclude_scam=exclude_scam, exclude_red_label=exclude_red)
             usernames = re.split(r"[\s,;]+", channels_text.strip()) if channels_text.strip() else []
             if not mode.startswith("TGStat") and not usernames:
                 raise ValueError("Добавьте хотя бы один канал")
-            run_topic = MICRO_NICHES[micro_id]["title"] if micro_id else topic
-            runner.start(settings, unique_queries(st.session_state["keyword_text"].splitlines()), run_topic, usernames)
+            run_topic = topic or 'Заданные каналы'
+            if micro_id:
+                run_topic += ' · ' + MICRO_NICHES[micro_id]['title']
+            runner.start(settings, niche=run_topic, usernames=usernames)
             st.rerun()
         except (ValueError, RuntimeError, OSError) as exc:
             st.error(str(exc))
@@ -125,11 +162,13 @@ def results_panel():
             runner.stop()
             st.rerun()
     elif state["status"] in ("cancelled", "interrupted", "failed", "partial"):
+        if state.get('settings', {}).get('search_mode', 'keywords') == 'keywords' and not state.get('manual'):
+            st.info('Сохранён прежний поиск по словам. Его продолжение сохранит прежний способ поиска. Для поиска по тематикам начните новый запуск слева.')
         if st.button("Продолжить сохранённый запуск"):
             try:
                 resume_config = {**state["settings"], "max_audits": audit_budget, "max_minutes": time_limit,
                                  "login_wait_seconds": 60 if login_pause else 0}
-                runner.start(settings=Settings(**resume_config), resume=True)
+                runner.start(settings=Settings.from_saved(resume_config), resume=True)
                 st.rerun()
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(str(exc))
@@ -138,13 +177,13 @@ def results_panel():
     with st.expander("Ход работы", expanded=running):
         st.code("\n".join(state["logs"][-35:]) or "Выберите нишу и запустите поиск слева.", language=None)
     if state.get("query_stats"):
-        with st.expander("Эффективность поисковых запросов"):
-            st.dataframe(pd.DataFrame([{"Запрос": q, **stats} for q, stats in state["query_stats"].items()]),
+        with st.expander("Эффективность тематик / прежних запросов"):
+            st.dataframe(pd.DataFrame([{"Тематика / запрос": category_label(q), **stats} for q, stats in state["query_stats"].items()]),
                          hide_index=True, width="stretch")
             history = runner.repo.query_history(state.get("query_scope", ""), state.get("run_id"))
             if history:
                 st.caption("Предыдущие запуски с теми же направлением, фильтрами и версией правил")
-                st.dataframe(pd.DataFrame([{"Запрос": q, **stats} for q, stats in history.items()]), hide_index=True, width="stretch")
+                st.dataframe(pd.DataFrame([{"Тематика / запрос": category_label(q), **stats} for q, stats in history.items()]), hide_index=True, width="stretch")
     if not rows:
         st.info("Результаты появятся по мере аудита. Можно также проверить свой список публичных каналов.")
         return

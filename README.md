@@ -17,7 +17,9 @@
 
 ## Возможности
 
-- Каталог ChatGPT + Claude: 11 ниш, 52 направления, 718 запросов; ключи можно редактировать.
+- Основной поиск: 47 реальных тематик TGStat, без текстовых запросов. Тематики выбираются в панели.
+- Редактируемые фильтры TGStat: язык, страна, тип, возраст, ERR/ER, состав аудитории, подписчики, охваты и ИЦ.
+- Каталоги ChatGPT + Claude используются для оценки содержания и персонализации; генератор ключей убран из основного поиска.
 - TGStat в одном Chrome; четыре потока публичного аудита `t.me/s`, общий лимит два запроса/с по умолчанию.
 - Цель — число предварительно подходящих каналов. Поиск продолжается после отсева; бюджет по умолчанию 10 × цель и 60 минут.
 - Метрики, тип канала и соответствие направлению проверяются отдельно. Для зелёной метки нужны все три условия.
@@ -31,8 +33,8 @@
 ## Консоль
 
 ```powershell
-.\.venv\Scripts\python.exe robot_parser.py --niche 1 --micro motion_design --count 30
-.\.venv\Scripts\python.exe robot_parser.py --topic 'ландшафтный дизайн' --count 30
+.\.venv\Scripts\python.exe robot_parser.py --categories 34 --count 30
+.\.venv\Scripts\python.exe robot_parser.py --categories 53 --micro landscape_design --count 30
 .\.venv\Scripts\python.exe robot_parser.py --channels @channel_one @channel_two --count 2
 .\.venv\Scripts\python.exe robot_parser.py --resume
 ```
@@ -58,6 +60,7 @@
 
 ## Документация
 
+- [Поиск по тематикам и фильтры со скриншотов](docs/TGSTAT_SEARCH.md)
 - [Инструкция](docs/Инструкция_Монетизатор.md)
 - [Каталоги и происхождение](docs/CATALOGS.md)
 - [Измерение качества](docs/QUALITY.md)

@@ -18,6 +18,8 @@ from .repository import Repository, dumps
 from .profile import load_profile
 from .search import TGStatSearch, SearchBudgetExceeded
 from .settings import Settings
+from .categories import category_key, category_label, category_id_from_key, CATEGORY_RULES_VERSION
+from .tgstat_filters import filter_spec
 
 RANK = {"top": 0, "recommended": 1, "review": 2, "rejected": 3, "error": 4}
 STOP_LABELS = {"target_reached": "Цель достигнута", "exhausted": "Доступная выдача исчерпана",
@@ -84,11 +86,11 @@ class JobRunner:
             self.repo.import_checkpoint(self.checkpoint)
             loaded = self.repo.load_run()
             if loaded:
-                Settings(**loaded["settings"])
+                Settings.from_saved(loaded["settings"])
                 if loaded.get("status") in ("running", "stopping"):
                     loaded.update(status="interrupted", stage="Сохранён незавершённый запуск")
                 self.state.update(loaded)
-                settings = Settings(**self.state["settings"])
+                settings = Settings.from_saved(self.state["settings"])
                 self.state["rows"] = [self._evaluate(r, settings) for r in self.state["rows"]]
                 self.repo.save_state(self.state)
         except (ValueError, KeyError, TypeError, OSError) as exc:
@@ -98,7 +100,8 @@ class JobRunner:
                 startup_guard.__exit__()
 
     def _evaluate(self, row, settings):
-        row = qualify(reassess_metrics(row, settings), self.state.get("niche", ""), settings.niche_id, settings.micro_id)
+        row = qualify(reassess_metrics(row, settings), self.state.get("niche", ""), settings.niche_id,
+                      settings.micro_id, settings.category_ids)
         if not row.get("pitch_edited"):
             draft = compose_pitch(row, self.state.get("niche", ""), profile=load_profile(self.repo))
             row.update(pitch=draft["message"], pitch_scenario=draft["scenario_id"],
@@ -122,7 +125,14 @@ class JobRunner:
 
     def _stats(self):
         for row in self.state["rows"]:
-            row["source_queries"] = " | ".join(self.state["candidates"].get(row["username"].lstrip("@"), []))
+            sources = self.state['candidates'].get(row['username'].lstrip('@'), [])
+            row['source_queries'] = ' | '.join(q for q in sources if not q.startswith('tgstat:'))
+            row['source_categories'] = ' | '.join(category_label(q) for q in sources if q.startswith('tgstat:'))
+            category_sources = [category_id_from_key(q) for q in sources if q.startswith('tgstat:')]
+            if not self.state.get('manual') and category_sources:
+                # Site filters are recorded as provenance, not inferred from t.me preview metrics.
+                row['tgstat_filters'] = filter_spec(Settings.from_saved(self.state['settings']), category_sources[0])
+                row['tgstat_filters']['selects']['categories'] = category_sources
         for query, stats in self.state.get("query_stats", {}).items():
             rows = [r for r in self.state["rows"] if query in self.state["candidates"].get(r["username"].lstrip("@"), [])]
             stats.update(audited=len(rows), qualified=sum(r["status"] in ("top", "recommended") for r in rows),
@@ -149,13 +159,17 @@ class JobRunner:
             if resume:
                 if not self.state.get("settings"):
                     raise ValueError("Нет сохранённого запуска")
-                settings = settings or Settings(**self.state["settings"])
+                settings = settings or Settings.from_saved(self.state["settings"])
             else:
                 settings = settings or Settings()
+                if settings.search_mode == 'categories' and not usernames:
+                    if queries:
+                        raise ValueError('Поиск по тематикам выполняется без текстовых запросов')
+                    queries = [category_key(c) for c in settings.category_ids]
                 queries = unique_queries(queries or [])
                 usernames = list(dict.fromkeys(normalize_username(u) for u in (usernames or [])))
                 if not queries and not usernames:
-                    raise ValueError("Добавьте ключи или каналы")
+                    raise ValueError("Выберите тематики TGStat или добавьте каналы")
                 if len(queries) > 50:
                     raise ValueError("Допустимо не более 50 запросов")
             guard = RunGuard(self.repo.path)
@@ -164,7 +178,7 @@ class JobRunner:
                 scope_data = {k: v for k, v in settings.to_dict().items() if k not in (
                     "target_count", "max_audits", "max_minutes", "new_only", "workers", "requests_per_second", "login_wait_seconds", "retries", "connect_timeout", "read_timeout")}
                 self.state = {"run_id": uuid4().hex, "settings": settings.to_dict(), "queries": queries,
-                              "query_scope": hashlib.sha256(dumps([niche, scope_data, RULE_VERSION, CATALOG_VERSION]).encode()).hexdigest(),
+                              "query_scope": hashlib.sha256(dumps([niche, scope_data, RULE_VERSION, CATALOG_VERSION, CATEGORY_RULES_VERSION]).encode()).hexdigest(),
                               "niche": niche.strip(), "manual": bool(usernames), "rows": [], "logs": [], "paths": [],
                               "error": "", "search_complete": bool(usernames), "candidates": {u: ["Введён вручную"] for u in usernames},
                               "queue": list(usernames), "query_state": {}, "query_stats": {}, "elapsed_seconds": 0,
@@ -225,6 +239,7 @@ class JobRunner:
                 cursor["exhausted"] = response["exhausted"]
                 cursor["blocked"] = response.get("restricted", False)
                 stats["found"] += len(names)
+                stats['without_public_username'] = stats.get('without_public_username', 0) + response.get('without_public_username', 0)
                 if cursor["blocked"]:
                     stats["access_errors"] += 1
             except (Cancelled, SearchBudgetExceeded):
@@ -232,7 +247,7 @@ class JobRunner:
             except Exception as exc:
                 cursor.update(exhausted=True, blocked=True)
                 stats["access_errors"] += 1
-                self.log(f"{query}: {type(exc).__name__}: {exc}")
+                self.log(f"{category_label(query)}: {type(exc).__name__}: {exc}")
             finally:
                 stats["seconds"] += round(time.monotonic() - started, 3)
         portion = cursor["buffer"][:10]
@@ -250,7 +265,7 @@ class JobRunner:
                     self.state["candidates"][username] = [query]
                     self.state["queue"].append(username)
             self.state["query_state"][query], self.state["query_stats"][query] = cursor, stats
-        self.log(f"{query}: найдено {stats['found']}, повторов {stats['duplicates']}")
+        self.log(f"{category_label(query)}: найдено {stats['found']}, повторов {stats['duplicates']}")
         self._persist()
 
     def _consume(self, future, username, settings):
@@ -293,7 +308,7 @@ class JobRunner:
             self.guard.__exit__()
 
     def _execute(self):
-        settings = Settings(**self.state["settings"])
+        settings = Settings.from_saved(self.state["settings"])
         auditor, search = WebAuditor(settings, self.stop_event), None
         executor, pending = ThreadPoolExecutor(max_workers=settings.workers, thread_name_prefix="audit"), {}
         reason, failure = "exhausted", ""
@@ -396,7 +411,7 @@ class JobRunner:
                 raise ValueError("Канал отсутствует в текущем отчёте")
             if context:
                 row.update({k: context[k] for k in ("about_text", "content_samples", "youtube", "instagram") if k in context})
-                updated = self._evaluate(row, Settings(**self.state["settings"]))
+                updated = self._evaluate(row, Settings.from_saved(self.state["settings"]))
                 row.update(updated)
             draft = dict(pitch=message, pitch_edited=True, pitch_scenario=scenario_id,
                          pitch_source=source_id or "", pitch_rule_version=PLAYBOOK_VERSION)
@@ -411,9 +426,9 @@ class JobRunner:
         if self.state["status"] in ("running", "stopping"):
             raise RuntimeError("Сначала остановите поиск")
         with RunGuard(self.repo.path):
-            auditor = WebAuditor(Settings(**self.state.get("settings", {})))
+            auditor = WebAuditor(Settings.from_saved(self.state.get("settings", {})))
             try:
-                row = self._evaluate(auditor.audit(username), Settings(**self.state.get("settings", {})))
+                row = self._evaluate(auditor.audit(username), Settings.from_saved(self.state.get("settings", {})))
             finally:
                 auditor.close()
             self.state["rows"] = [r for r in self.state["rows"] if r["username"] != row["username"]] + [row]
@@ -432,6 +447,6 @@ class JobRunner:
                 self.state = loaded
                 if self.state["status"] in ("running", "stopping"):
                     self.state.update(status="interrupted", stage="Сохранён незавершённый запуск")
-                settings = Settings(**self.state["settings"])
+                settings = Settings.from_saved(self.state["settings"])
                 self.state["rows"] = [self._evaluate(row, settings) for row in self.state["rows"]]
             self._persist()

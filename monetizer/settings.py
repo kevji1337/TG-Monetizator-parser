@@ -24,8 +24,62 @@ class Settings:
     new_only: bool = True
     niche_id: str = ""
     micro_id: str = ""
+    # Historical checkpoints without these fields retain keyword mode only for resume.
+    search_mode: str = 'keywords'
+    category_ids: tuple[str, ...] = ()
+    country_ids: tuple[str, ...] = ()
+    language_ids: tuple[str, ...] = ('3',)  # Русский, actual TGStat option ID.
+    channel_type: str = ''  # TGStat: any; private channels may have no public preview.
+    min_age_months: int = 12
+    max_age_months: int | None = None  # Slider's 120+ endpoint means unbounded.
+    min_err: int = 10
+    max_err: int | None = None  # Slider's 100+ endpoint means unbounded.
+    min_er: float = 0.0
+    min_male: int = 0
+    min_female: int = 0
+    tgstat_min_avg_reach: int | None = None
+    tgstat_max_avg_reach: int | None = None
+    max_daily_reach: int | None = None
+    min_ci: float | None = None
+    max_ci: float | None = None
+    exclude_dead: bool = True
+    exclude_scam: bool = True
+    exclude_red_label: bool = True
 
     def __post_init__(self):
+        if self.search_mode not in ('categories', 'keywords', 'manual'):
+            raise ValueError('Неизвестный способ поиска')
+        if (not isinstance(self.category_ids, (tuple, list)) or len(self.category_ids) > 20 or
+                any(not isinstance(v, str) or not v.isascii() or not v.isdigit() for v in self.category_ids)):
+            raise ValueError('Выберите до 20 тематик TGStat')
+        object.__setattr__(self, 'category_ids', tuple(dict.fromkeys(self.category_ids)))
+        if self.search_mode == 'categories' and not self.category_ids:
+            raise ValueError('Выберите хотя бы одну тематику TGStat')
+        for field in ('country_ids', 'language_ids'):
+            values = getattr(self, field)
+            if (not isinstance(values, (list, tuple)) or len(values) > 100 or
+                    any(not isinstance(v, str) or not v.isascii() or not v.isdigit() for v in values)):
+                raise ValueError('Неверный выбор страны или языка')
+            object.__setattr__(self, field, tuple(dict.fromkeys(values)))
+        if self.channel_type not in ('', 'public', 'private'):
+            raise ValueError('Неверный тип канала')
+        if (type(self.min_age_months) is not int or not 0 <= self.min_age_months <= 120 or
+                self.max_age_months is not None and (type(self.max_age_months) is not int or not self.min_age_months <= self.max_age_months < 120)):
+            raise ValueError('Возраст: 0–120+ месяцев; верхняя граница 120+ задаётся без ограничения')
+        if (type(self.min_err) is not int or not 0 <= self.min_err <= 100 or
+                self.max_err is not None and (type(self.max_err) is not int or not self.min_err <= self.max_err < 100)):
+            raise ValueError('ERR: 0–100+%; верхняя граница 100+ задаётся без ограничения')
+        if not 0 <= self.min_er <= 10 or self.min_er * 2 != int(self.min_er * 2):
+            raise ValueError('ER: от 0 до 10+% с шагом 0.5')
+        if any(type(v) is not int or not 0 <= v <= 90 or v % 5 for v in (self.min_male, self.min_female)):
+            raise ValueError('Доля аудитории: от 0 до 90+% с шагом 5')
+        for lower, upper in ((self.tgstat_min_avg_reach, self.tgstat_max_avg_reach),
+                             (self.min_daily_reach, self.max_daily_reach), (self.min_ci, self.max_ci)):
+            if ((lower is not None and lower < 0) or (upper is not None and upper < 0) or
+                    lower is not None and upper is not None and lower > upper):
+                raise ValueError('Проверьте нижнюю и верхнюю границы охвата / ИЦ')
+        if any(type(v) is not bool for v in (self.exclude_dead, self.exclude_scam, self.exclude_red_label)):
+            raise ValueError('Фильтры исключения должны быть логическими')
         if not 1 <= self.min_subs <= self.max_subs:
             raise ValueError("Проверьте диапазон подписчиков")
         if not 1 <= self.target_count <= 1000:
@@ -51,3 +105,11 @@ class Settings:
 
     def to_dict(self):
         return asdict(self)
+
+    @classmethod
+    def from_saved(cls, data):
+        """Resume old searches with their original filters, not today's default preset."""
+        data = dict(data)
+        if 'min_age_months' not in data:
+            data.update(min_age_months=0, min_err=0, language_ids=(), channel_type='public')
+        return cls(**data)
