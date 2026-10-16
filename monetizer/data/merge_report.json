@@ -1,0 +1,249 @@
+{
+  "version": 2,
+  "mappings": {
+    "video_editing_nle": [
+      "video_editing"
+    ],
+    "motion_design_graphics": [
+      "motion_design"
+    ],
+    "three_d_modeling_render": [
+      "three_d_visualization"
+    ],
+    "video_shooting_camera_light": [
+      "video_production"
+    ],
+    "ai_for_photo_video_creators": [
+      "ai_for_photographers",
+      "ai_for_designers",
+      "ai_video_creation"
+    ],
+    "ai_for_marketers_copywriters": [
+      "ai_for_marketers"
+    ],
+    "ai_for_developers_analysts": [
+      "ai_for_developers",
+      "ai_for_analysts"
+    ],
+    "ai_for_office_legal_hr_teachers": [
+      "ai_office_professionals"
+    ],
+    "doctor_patient_education": [
+      "clinical_medicine"
+    ],
+    "nutrition_dietology": [
+      "dietitian_nutrition"
+    ],
+    "rehab_posture_back_pain": [
+      "physiotherapy_rehab"
+    ],
+    "practicing_psychologist": [
+      "psychotherapy_practice"
+    ],
+    "relationships_family_parenting": [
+      "family_relationship_psychology"
+    ],
+    "self_knowledge_reflection": [
+      "self_reflection_practices"
+    ],
+    "b2b_sales": [
+      "b2b_sales"
+    ],
+    "b2b_marketing_leadgen": [
+      "b2b_lead_generation"
+    ],
+    "management_operations_finance": [
+      "business_operations",
+      "unit_economics",
+      "hr_leadership"
+    ],
+    "realtor_experts": [
+      "residential_realtor"
+    ],
+    "landscape_design": [
+      "landscape_design"
+    ],
+    "author_tours_guides": [
+      "author_tours"
+    ],
+    "it_career_resume_search": [
+      "it_career_coaching"
+    ],
+    "it_interview_preparation": [
+      "it_career_coaching"
+    ],
+    "beauty_client_acquisition": [
+      "beauty_client_acquisition"
+    ],
+    "beauty_business_operations": [
+      "beauty_business_operations"
+    ],
+    "personal_budget_savings": [
+      "personal_budgeting"
+    ],
+    "investing_securities": [
+      "long_term_investing"
+    ],
+    "taxes_deductions_protection": [
+      "taxes_personal_finance"
+    ],
+    "english_speaking_exams": [
+      "english_exams",
+      "business_english",
+      "general_english"
+    ],
+    "european_languages": [
+      "german_language",
+      "spanish_french_language"
+    ],
+    "asian_languages": [
+      "asian_languages"
+    ],
+    "strength_training_gym": [
+      "strength_coaching"
+    ],
+    "running_endurance_triathlon": [
+      "running_endurance"
+    ],
+    "yoga_pilates_mobility": [
+      "yoga_pilates",
+      "mobility_functional_fitness"
+    ],
+    "ux_ui_product_design": [
+      "ux_ui_design"
+    ],
+    "presentation_design": [
+      "presentation_design"
+    ],
+    "web_design_nocode_builders": [
+      "websites_nocode"
+    ],
+    "graphic_design_branding_portfolio": [
+      "brand_portfolio"
+    ]
+  },
+  "pending_review": [
+    {
+      "source_id": "ai_for_developers_analysts",
+      "field": "discovery_queries",
+      "value": "промпт инжиниринг",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "ai_for_developers_analysts",
+      "field": "match_terms",
+      "value": "промпт-инжиниринг",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "discovery_queries",
+      "value": "итальянский язык",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "discovery_queries",
+      "value": "португальский язык",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "discovery_queries",
+      "value": "польский язык",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "discovery_queries",
+      "value": "нидерландский язык",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "match_terms",
+      "value": "итальянский язык",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "match_terms",
+      "value": "CELI",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "match_terms",
+      "value": "португальский язык",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "match_terms",
+      "value": "польский язык",
+      "reason": "Нет однозначного узкого направления"
+    },
+    {
+      "source_id": "european_languages",
+      "field": "match_terms",
+      "value": "нидерландский язык",
+      "reason": "Нет однозначного узкого направления"
+    }
+  ],
+  "source_hashes": {
+    "keyword_catalog_chatgpt.json": "7114783f89d60ed59a737eef5c92ffa0d1ecce84206f7516625bf12432358a6e",
+    "keyword_catalog_claude.json": "848847d10de37301bd1e4f66487fb51731a6f987d4550c641b56b536239a37ad",
+    "outreach_playbook_chatgpt.json": "7c4b4578e082730c2d41967365718362de0943f9559ffc325ba5b3a7c2506c2e",
+    "outreach_playbook_claude.json": "e26b3d534237e40d8e3857c2b7d774bbd51649eb6a7e607ae790abbb2d0f0085"
+  },
+  "preserved_micro_ids": [
+    "ai_for_analysts",
+    "ai_for_designers",
+    "ai_for_developers",
+    "ai_for_marketers",
+    "ai_for_photographers",
+    "author_tours",
+    "b2b_sales",
+    "beauty_business_operations",
+    "beauty_client_acquisition",
+    "brand_portfolio",
+    "business_english",
+    "business_operations",
+    "career_psychology",
+    "cbt_psychology",
+    "clinical_medicine",
+    "commercial_real_estate",
+    "dentistry_practice",
+    "dietitian_nutrition",
+    "english_exams",
+    "family_relationship_psychology",
+    "financial_planning",
+    "german_language",
+    "hr_leadership",
+    "it_career_coaching",
+    "it_portfolio_mentor",
+    "landscape_design",
+    "long_term_investing",
+    "mobility_functional_fitness",
+    "motion_design",
+    "online_fitness_coaching",
+    "personal_budgeting",
+    "physiotherapy_rehab",
+    "presentation_design",
+    "residential_realtor",
+    "running_endurance",
+    "self_reflection_practices",
+    "spanish_french_language",
+    "strength_coaching",
+    "taxes_personal_finance",
+    "three_d_visualization",
+    "unit_economics",
+    "ux_ui_design",
+    "video_editing",
+    "video_production",
+    "websites_nocode"
+  ],
+  "micro_count": 52,
+  "query_count": 718,
+  "scenario_count": 11
+}

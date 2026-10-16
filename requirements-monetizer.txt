@@ -1,0 +1,2 @@
+# Compatibility with earlier setup instructions.
+-r requirements.txt
