@@ -14,16 +14,17 @@ from .export import RESULTS_DIR, atomic_json, save_reports
 from .keywords import unique_queries, CATALOG_VERSION
 from .pitches import compose_pitch, PLAYBOOK_VERSION
 from .qualification import qualify, RULE_VERSION
-from .repository import Repository, dumps
-from .profile import load_profile
+from .repository import Repository, dumps, content_hash
+from .profile import load_profile, profile_version
 from .search import TGStatSearch, SearchBudgetExceeded
 from .settings import Settings
 from .categories import category_key, category_label, category_id_from_key, CATEGORY_RULES_VERSION
 from .tgstat_filters import filter_spec
+from .diagnostics import BrowserControl, logger
 
 RANK = {"top": 0, "recommended": 1, "review": 2, "rejected": 3, "error": 4}
 STOP_LABELS = {"target_reached": "Цель достигнута", "exhausted": "Доступная выдача исчерпана",
-               "restricted": "Выдача ограничена TGStat", "audit_budget": "Достигнут лимит аудитов",
+               "restricted": "TGStat ограничил выдачу: требуется вход или достигнут лимит доступа", "audit_budget": "Достигнут лимит аудитов",
                "time_budget": "Достигнут лимит времени", "cancelled": "Остановлено пользователем",
                "manual_exhausted": "Ручной аудит завершён", "error": "Ошибка выполнения"}
 
@@ -69,6 +70,7 @@ class JobRunner:
         self.thread, self._active_started = None, None
         self._external_owner = False
         self._base_elapsed = 0.0
+        self.browser_control = BrowserControl(self._browser_state)
         self.state = {"status": "idle", "stage": "Готов к запуску", "rows": [], "candidates": {},
                       "logs": [], "paths": [], "error": "", "search_complete": False}
         startup_guard = None
@@ -87,12 +89,15 @@ class JobRunner:
             loaded = self.repo.load_run()
             if loaded:
                 Settings.from_saved(loaded["settings"])
-                if loaded.get("status") in ("running", "stopping"):
+                interrupted = loaded.get("status") in ("running", "stopping")
+                if interrupted:
                     loaded.update(status="interrupted", stage="Сохранён незавершённый запуск")
                 self.state.update(loaded)
                 settings = Settings.from_saved(self.state["settings"])
-                self.state["rows"] = [self._evaluate(r, settings) for r in self.state["rows"]]
-                self.repo.save_state(self.state)
+                original_rows = self.state['rows']
+                self.state["rows"] = [self._evaluate(r, settings) for r in original_rows]
+                if interrupted or original_rows != self.state['rows']:
+                    self.repo.save_state(self.state)
         except (ValueError, KeyError, TypeError, OSError) as exc:
             self.state["error"] = f"Не удалось прочитать сохранённый запуск: {exc}"
         finally:
@@ -100,13 +105,27 @@ class JobRunner:
                 startup_guard.__exit__()
 
     def _evaluate(self, row, settings):
+        profile = load_profile(self.repo)
+        signature = hashlib.sha256(dumps([content_hash(row), settings.to_dict(), self.state.get('niche', ''),
+                                         RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, profile_version(profile),
+                                         datetime.now(timezone.utc).date().isoformat()]).encode()).hexdigest()
+        if row.get('_evaluation_signature') == signature:
+            return copy.deepcopy(row)
         row = qualify(reassess_metrics(row, settings), self.state.get("niche", ""), settings.niche_id,
                       settings.micro_id, settings.category_ids)
         if not row.get("pitch_edited"):
-            draft = compose_pitch(row, self.state.get("niche", ""), profile=load_profile(self.repo))
+            draft = compose_pitch(row, self.state.get("niche", ""), profile=profile)
             row.update(pitch=draft["message"], pitch_scenario=draft["scenario_id"],
                        pitch_source=(draft["source"] or {}).get("id", ""), pitch_rule_version=PLAYBOOK_VERSION)
+        row['_evaluation_signature'] = signature
         return row
+
+    def _browser_state(self, state):
+        with self.lock:
+            self.state['browser'] = state
+
+    def resume_browser(self):
+        self.browser_control.resume.set()
 
     def snapshot(self):
         if self._external_owner:
@@ -149,6 +168,7 @@ class JobRunner:
         atomic_json(self.checkpoint, state)
 
     def log(self, message):
+        logger().info('run=%s %s', self.state.get('run_id', 'startup'), message)
         with self.lock:
             self.state["logs"] = (self.state["logs"] + [f"{datetime.now().strftime('%H:%M:%S')}  {message}"])[-300:]
 
@@ -176,7 +196,8 @@ class JobRunner:
             guard.__enter__()
             if not resume:
                 scope_data = {k: v for k, v in settings.to_dict().items() if k not in (
-                    "target_count", "max_audits", "max_minutes", "new_only", "workers", "requests_per_second", "login_wait_seconds", "retries", "connect_timeout", "read_timeout")}
+                    "target_count", "max_audits", "max_minutes", "new_only", "workers", "requests_per_second", "login_wait_seconds", "retries", "connect_timeout", "read_timeout",
+                    'dev_mode', 'keep_browser_on_error', 'browser_wait_seconds')}
                 self.state = {"run_id": uuid4().hex, "settings": settings.to_dict(), "queries": queries,
                               "query_scope": hashlib.sha256(dumps([niche, scope_data, RULE_VERSION, CATALOG_VERSION, CATEGORY_RULES_VERSION]).encode()).hexdigest(),
                               "niche": niche.strip(), "manual": bool(usernames), "rows": [], "logs": [], "paths": [],
@@ -193,6 +214,7 @@ class JobRunner:
                 if resume and self.state["query_state"][query]["blocked"]:
                     self.state["query_state"][query].update(blocked=False, exhausted=False)
             self.stop_event.clear()
+            self.browser_control = BrowserControl(self._browser_state)
             self.state.update(status="running", stage="Подготовка", error="", stop_reason="")
             self._base_elapsed = self.state.get("elapsed_seconds", 0)
             self._active_started = time.monotonic()
@@ -245,6 +267,7 @@ class JobRunner:
             except (Cancelled, SearchBudgetExceeded):
                 raise
             except Exception as exc:
+                logger().exception('run=%s category=%s discovery failed', self.state.get('run_id'), query)
                 cursor.update(exhausted=True, blocked=True)
                 stats["access_errors"] += 1
                 self.log(f"{category_label(query)}: {type(exc).__name__}: {exc}")
@@ -276,6 +299,7 @@ class JobRunner:
         except Cancelled:
             return
         except Exception as exc:
+            logger().exception('run=%s audit worker failed', self.state.get('run_id'))
             row = error_row(username, "worker_error", str(exc))
         row = self._evaluate(row, settings)
         row["source_queries"] = " | ".join(self.state["candidates"][username])
@@ -297,6 +321,7 @@ class JobRunner:
         try:
             self._execute()
         except Exception as exc:
+            logger().exception('run=%s task failed', self.state.get('run_id'))
             with self.lock:
                 self._active_started = None
                 self.state.update(status="failed", stage="Ошибка сохранения или завершения", error=f"{type(exc).__name__}: {exc}")
@@ -314,7 +339,7 @@ class JobRunner:
         reason, failure = "exhausted", ""
         deadline = self._active_started + max(0, settings.max_minutes * 60 - self._base_elapsed)
         try:
-            search = TGStatSearch(settings, self.stop_event, self.log, deadline)
+            search = TGStatSearch(settings, self.stop_event, self.log, deadline, self.browser_control)
             excluded = self.repo.processed() if settings.new_only and not self.state.get("manual") else set()
             history = self.repo.query_history(self.state.get("query_scope", ""), self.state.get("run_id"))
             with self.lock:

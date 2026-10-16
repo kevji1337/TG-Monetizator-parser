@@ -2,8 +2,9 @@
 import re
 import hashlib
 import json
+import os
+import time
 
-import pandas as pd
 import streamlit as st
 
 from monetizer.export import COLUMNS, csv_bytes, xlsx_bytes
@@ -19,6 +20,9 @@ from monetizer.settings import Settings
 from monetizer.ui_workspace import render_workspace, show_evidence
 from monetizer.ui_quality import profile_panel
 from monetizer.profile import profile_version
+from monetizer.diagnostics import logger
+
+PAGE_STARTED = time.perf_counter()
 
 st.set_page_config(page_title="Монетизатор · Telegram", page_icon="🔎", layout="wide")
 
@@ -37,9 +41,15 @@ runner = get_runner()
 sender_profile = profile_panel(runner.repo)
 st.title("Монетизатор трафика")
 st.caption("Поиск публичных Telegram-каналов экспертов · аудит просмотров · черновики предложений")
+section = st.radio('Раздел', ['Поиск', 'База кандидатов', 'История запусков', 'Пакет ChatGPT', 'Качество отбора', 'Dev-диагностика'],
+                   horizontal=True)
 
 with st.sidebar:
     st.header("Новый поиск")
+    with st.expander('Режим разработки'):
+        dev_mode = st.checkbox('Dev-режим', value=os.environ.get('MONETIZER_DEV') == '1')
+        keep_browser = st.checkbox('Оставлять Chrome открытым при ошибке', value=True)
+        browser_wait = st.number_input('Ожидание ручного входа, секунд', 0, 1800, 300, step=30)
     mode = st.radio("Источник", ["TGStat — каталог тематик", "Список каналов — только аудит"])
     snapshot = load_categories()
     labels = {c['id']: c['title'] for c in snapshot['categories']}
@@ -60,10 +70,12 @@ with st.sidebar:
             if st.button('Обновить тематики с TGStat', disabled=runner.snapshot()['status'] in ('running', 'stopping')):
                 try:
                     with st.spinner('Читаю список тематик TGStat в Chrome…'):
-                        refresh_categories()
+                        refresh_categories(Settings(dev_mode=dev_mode, keep_browser_on_error=keep_browser,
+                                                    browser_wait_seconds=browser_wait))
                     st.rerun()
                 except Exception as exc:
                     st.error(f'Не удалось обновить тематики: {exc}')
+                    st.caption('Полная ошибка сохранена в разделе «Dev-диагностика». Сохранённый список тематик остаётся доступным.')
     else:
         channels_text = st.text_area("@username или ссылки t.me — по одному на строку", height=150)
     with st.expander('Фокус аудита — необязательно'):
@@ -125,7 +137,8 @@ with st.sidebar:
                                 min_er=er, min_male=male, min_female=female,
                                 tgstat_min_avg_reach=tgstat_views_from, tgstat_max_avg_reach=tgstat_views_to,
                                 max_daily_reach=daily_to, min_ci=ci_from, max_ci=ci_to,
-                                exclude_dead=exclude_dead, exclude_scam=exclude_scam, exclude_red_label=exclude_red)
+                                exclude_dead=exclude_dead, exclude_scam=exclude_scam, exclude_red_label=exclude_red,
+                                dev_mode=dev_mode, keep_browser_on_error=keep_browser, browser_wait_seconds=browser_wait)
             usernames = re.split(r"[\s,;]+", channels_text.strip()) if channels_text.strip() else []
             if not mode.startswith("TGStat") and not usernames:
                 raise ValueError("Добавьте хотя бы один канал")
@@ -151,6 +164,10 @@ def results_panel():
     metrics[2].metric("Подходящие / цель", f"{green} / {state.get('settings', {}).get('target_count', 30)}")
     metrics[3].metric("Ошибки доступа", sum(r.get("status") == "error" for r in rows))
     st.write(f"**{state['stage']}**")
+    if state.get('browser', {}).get('waiting'):
+        st.warning(state['browser']['message'])
+        if st.button('Продолжить после входа', key='search_resume'):
+            runner.resume_browser()
     if state.get("niche"):
         st.caption(f"Текущий отчёт: {state['niche']}")
     if running:
@@ -167,7 +184,8 @@ def results_panel():
         if st.button("Продолжить сохранённый запуск"):
             try:
                 resume_config = {**state["settings"], "max_audits": audit_budget, "max_minutes": time_limit,
-                                 "login_wait_seconds": 60 if login_pause else 0}
+                                 "login_wait_seconds": 60 if login_pause else 0,
+                                 'dev_mode': dev_mode, 'keep_browser_on_error': keep_browser, 'browser_wait_seconds': browser_wait}
                 runner.start(settings=Settings.from_saved(resume_config), resume=True)
                 st.rerun()
             except (ValueError, RuntimeError, OSError) as exc:
@@ -177,6 +195,7 @@ def results_panel():
     with st.expander("Ход работы", expanded=running):
         st.code("\n".join(state["logs"][-35:]) or "Выберите нишу и запустите поиск слева.", language=None)
     if state.get("query_stats"):
+        import pandas as pd
         with st.expander("Эффективность тематик / прежних запросов"):
             st.dataframe(pd.DataFrame([{"Тематика / запрос": category_label(q), **stats} for q, stats in state["query_stats"].items()]),
                          hide_index=True, width="stretch")
@@ -187,6 +206,7 @@ def results_panel():
     if not rows:
         st.info("Результаты появятся по мере аудита. Можно также проверить свой список публичных каналов.")
         return
+    import pandas as pd
     st.caption("Зелёная метка: метрики + признаки личной практики минимум в двух источниках + соответствие теме. Это предварительный отбор. Суточный охват проверяется фильтром TGStat; здесь показываются просмотры постов. Низкое отношение просмотров к подписчикам не доказывает накрутку.")
     filter_columns = st.columns([1, 1, 2])
     only_green = filter_columns[0].checkbox("Только зелёные")
@@ -316,5 +336,13 @@ def results_panel():
                 st.code(path, language=None)
 
 
-results_panel()
-render_workspace(runner)
+if section == 'Поиск':
+    results_panel()
+elif section == 'Dev-диагностика':
+    from monetizer.ui_diagnostics import diagnostics_panel
+    diagnostics_panel(runner)
+else:
+    render_workspace(runner, section)
+if dev_mode:
+    st.caption(f'Отрисовка страницы: {time.perf_counter() - PAGE_STARTED:.3f} с')
+    logger().debug('UI section=%s render=%.3fs', section, time.perf_counter() - PAGE_STARTED)

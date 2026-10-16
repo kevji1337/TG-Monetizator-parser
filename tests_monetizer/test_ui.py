@@ -104,12 +104,14 @@ class InterfaceTests(unittest.TestCase):
         with patch("monetizer.runner.TGStatSearch") as browser, patch("monetizer.runner.WebAuditor") as network:
             app = AppTest.from_file(str(self.app_path)).run(timeout=15)
             self.assertEqual(len(app.exception), 0)
+            next(r for r in app.radio if r.label == 'Раздел').set_value('База кандидатов').run()
             next(s for s in app.selectbox if s.label == "Рабочий статус").select("contacted").run()
             next(t for t in app.text_area if t.label == "Заметка о кандидате").set_value("Отправлено личное предложение").run()
             next(b for b in app.button if b.label == "Сохранить статус и заметку").click().run()
             stored = self.runner.repo.list_channels()[0]
             self.assertEqual(stored["work_status"], "contacted")
             self.assertIn("личное предложение", stored["notes"])
+            next(r for r in app.radio if r.label == 'Раздел').set_value('Пакет ChatGPT').run()
             next(b for b in app.button if b.label == "Создать пакет ChatGPT").click().run()
             self.assertEqual(len(app.session_state["chat_batch"]["channels"]), 1)
             self.assertEqual(len(app.exception), 0)
@@ -140,6 +142,7 @@ class InterfaceTests(unittest.TestCase):
             next(t for t in app.text_area if t.label == 'Какие задачи берёте').set_value('привлечение заявок')
             next(b for b in app.button if b.label == 'Сохранить профиль отправителя').click().run()
             self.assertEqual(load_profile(self.runner.repo)['name'], 'Алексей')
+            next(r for r in app.radio if r.label == 'Раздел').set_value('Пакет ChatGPT').run()
             next(b for b in app.button if b.label == 'Создать пакет ChatGPT').click().run()
             self.assertEqual(app.session_state['chat_batch']['sender_profile']['services'], 'привлечение заявок')
             self.assertEqual(len(app.exception), 0)
@@ -151,6 +154,7 @@ class InterfaceTests(unittest.TestCase):
         self._seed_database()
         with patch('monetizer.runner.TGStatSearch') as browser, patch('monetizer.runner.WebAuditor') as network:
             app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(r for r in app.radio if r.label == 'Раздел').set_value('Качество отбора').run()
             next(s for s in app.selectbox if s.label == 'Тип канала по вашей оценке').select('expert')
             next(s for s in app.selectbox if s.label == 'Соответствие теме по вашей оценке').select('matched')
             next(s for s in app.selectbox if s.label == 'Проходит предварительный отбор по вашей оценке').select(True)
@@ -160,6 +164,31 @@ class InterfaceTests(unittest.TestCase):
             self.assertEqual(evaluate(self.runner.repo)['labelled'], 1)
             self.assertEqual(self.runner.repo.list_channels()[0]['work_status'], 'new')
             self.assertEqual(len(app.exception), 0)
+            browser.assert_not_called()
+            network.assert_not_called()
+
+    def test_start_page_does_not_render_hidden_workspace(self):
+        with patch('monetizer.ui_workspace.database_panel') as database, patch('monetizer.ui_workspace.history_panel') as history, \
+                patch('monetizer.ui_workspace.batch_panel') as batch, patch('monetizer.ui_workspace.quality_panel') as quality:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            self.assertEqual(len(app.exception), 0)
+            for panel in [database, history, batch, quality]:
+                panel.assert_not_called()
+
+    def test_manual_login_continue_button_signals_worker(self):
+        self.runner.state.update(status='running', stage='Ожидание входа', settings=__import__('monetizer.settings', fromlist=['Settings']).Settings().to_dict(),
+                                 browser={'waiting': True, 'message': 'Войдите в TGStat'})
+        app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+        next(b for b in app.button if b.label == 'Продолжить после входа').click().run()
+        self.assertTrue(self.runner.browser_control.resume.is_set())
+        self.assertEqual(len(app.exception), 0)
+
+    def test_dev_diagnostics_page_does_not_start_browser(self):
+        with patch('monetizer.runner.TGStatSearch') as browser, patch('monetizer.runner.WebAuditor') as network:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(r for r in app.radio if r.label == 'Раздел').set_value('Dev-диагностика').run()
+            self.assertEqual(len(app.exception), 0)
+            self.assertTrue(any(b.label == 'Скачать лог диагностики' for b in app.get('download_button')))
             browser.assert_not_called()
             network.assert_not_called()
 

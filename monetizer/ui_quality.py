@@ -1,6 +1,5 @@
 """Human evaluation and operator profile controls; all writes are explicit."""
 import json
-import pandas as pd
 import streamlit as st
 
 from .profile import load_profile, save_profile
@@ -27,6 +26,7 @@ def profile_panel(repo):
 
 
 def quality_panel(repo, running):
+    import pandas as pd
     st.caption('Разметка качества отделена от рабочих статусов и оценок AI. Для оценки рекомендуются 50–100 реальных каналов из разных запросов.')
     packet = review_set(repo)
     report = evaluate(repo)

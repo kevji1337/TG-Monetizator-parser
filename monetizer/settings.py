@@ -45,10 +45,15 @@ class Settings:
     exclude_dead: bool = True
     exclude_scam: bool = True
     exclude_red_label: bool = True
+    dev_mode: bool = False
+    keep_browser_on_error: bool = True
+    browser_wait_seconds: int = 300
 
     def __post_init__(self):
         if self.search_mode not in ('categories', 'keywords', 'manual'):
             raise ValueError('Неизвестный способ поиска')
+        if type(self.browser_wait_seconds) is not int or not 0 <= self.browser_wait_seconds <= 1800:
+            raise ValueError('Ожидание ручного входа: от 0 до 1800 секунд')
         if (not isinstance(self.category_ids, (tuple, list)) or len(self.category_ids) > 20 or
                 any(not isinstance(v, str) or not v.isascii() or not v.isdigit() for v in self.category_ids)):
             raise ValueError('Выберите до 20 тематик TGStat')

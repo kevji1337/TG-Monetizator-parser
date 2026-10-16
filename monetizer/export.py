@@ -6,10 +6,6 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = PROJECT_ROOT / "results" / "monetizer"
 COLUMNS = {
@@ -53,6 +49,9 @@ def csv_bytes(rows):
 
 
 def xlsx_bytes(rows):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Каналы"

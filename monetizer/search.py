@@ -3,6 +3,7 @@ import threading
 import time
 from pathlib import Path
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from .audit import Cancelled, normalize_username
 from .keywords import unique_queries
@@ -11,6 +12,11 @@ from .categories import (CACHE_PATH, category_key, category_id_from_key, validat
                          load_categories)
 from .export import atomic_json
 from .tgstat_filters import filter_spec
+from .diagnostics import diagnosed, logger, safe_url, retain, BrowserControl
+
+
+class RetryAfterLogin(Exception):
+    manual_retry = True
 
 
 class SearchBudgetExceeded(Exception):
@@ -18,12 +24,26 @@ class SearchBudgetExceeded(Exception):
 
 
 class TGStatSearch:
-    def __init__(self, settings, stop=None, log=print, deadline=None):
+    def __init__(self, settings, stop=None, log=print, deadline=None, control=None):
         self.settings, self.stop, self.log = settings, stop or threading.Event(), log
         self.deadline, self.driver = deadline, None
         self.current_query, self.current_page = None, -1
         self.applied_filters = None
         self._unavailable_urls = set()
+        self.session_id, self.stage = uuid4().hex[:12], 'created'
+        self.preserve_on_close = False
+        self.control = control or BrowserControl()
+
+    def location(self):
+        try:
+            return safe_url(self.driver.current_url) if self.driver else ''
+        except Exception:
+            return '[browser unavailable]'
+
+    def _progress(self, message, waiting=False):
+        logger().info('session=%s progress=%s', self.session_id, message)
+        self.log(message)
+        self.control.update(session_id=self.session_id, stage=self.stage, message=message, waiting=waiting)
 
     def _check(self):
         if self.stop.is_set():
@@ -33,16 +53,23 @@ class TGStatSearch:
 
     def _wait(self, predicate, seconds=40):
         from selenium.webdriver.support.ui import WebDriverWait
+        started, reported = time.monotonic(), [0]
         def checked(driver):
             self._check()
+            elapsed = time.monotonic() - started
+            if elapsed >= reported[0] + 10:
+                reported[0] = elapsed
+                self.log(f'Ожидаю TGStat: {int(elapsed)} с. Если видна проверка или вход, выполните их в Chrome.')
             return predicate(driver)
         return WebDriverWait(self.driver, seconds, poll_frequency=.3).until(checked)
 
     def __enter__(self):
         return self  # Chrome is created only for an actual search page.
 
+    @diagnosed('browser_start')
     def _open(self):
         import undetected_chromedriver as uc
+        from .browser import prepare_driver
         class QuietChrome(uc.Chrome):
             def __del__(self):
                 try:
@@ -50,14 +77,22 @@ class TGStatSearch:
                 except OSError:
                     pass
         self._check()
+        browser_path = uc.find_chrome_executable()
+        if not browser_path:
+            raise RuntimeError('Chrome не найден. Установите Google Chrome и повторите запуск.')
+        self._progress('Подготавливаю ChromeDriver…')
+        driver_path, major = prepare_driver(browser_path, self.log)
+        self._check()
         options = uc.ChromeOptions()
         options.add_argument("--start-maximized")
         options.add_argument("--no-first-run")
         profile = Path(__file__).resolve().parents[1] / "results" / "monetizer" / "chrome_profile"
         profile.mkdir(parents=True, exist_ok=True)
         self.log("Открываю Chrome для TGStat; при необходимости пройдите проверку в его окне.")
-        self.driver = QuietChrome(options=options, user_data_dir=str(profile))
+        self.driver = QuietChrome(options=options, user_data_dir=str(profile), driver_executable_path=driver_path,
+                                  browser_executable_path=browser_path, version_main=major)
         self.driver.set_page_load_timeout(35)
+        self._progress('Chrome открыт. Перехожу к TGStat.')
         if self.settings.login_wait_seconds:
             self.driver.get("https://tgstat.ru/channels/search")
             self.log(f"Пауза {self.settings.login_wait_seconds} с для ручного входа.")
@@ -66,6 +101,7 @@ class TGStatSearch:
                 self._check()
                 self.stop.wait(.25)
 
+    @diagnosed('submit_or_next_page')
     def _request(self, button):
         self._check()
         self._verify_filters()
@@ -80,21 +116,43 @@ class TGStatSearch:
         """, button)
         self._wait(lambda d: d.execute_script("return window.__monetizerRequest !== null"))
         response = self.driver.execute_script("return window.__monetizerRequest")
+        logger().info('session=%s AJAX http=%s status=%s', self.session_id, response.get('http'), response.get('status'))
         if response["http"] != 200:
             raise RuntimeError(f"TGStat HTTP {response['http']}")
         if response.get("status") == "restricted":
-            self.log("TGStat требует авторизацию; ограничение сохранено отдельно от пустой выдачи.")
+            self.preserve_on_close = True
+            if self._wait_for_login():
+                raise RetryAfterLogin()
             return False
         if response.get("status") not in (None, "ok", "success"):
             raise RuntimeError(f"TGStat: {response['status']}")
         return True
 
+    def _wait_for_login(self):
+        self.control.resume.clear()
+        message = 'TGStat требует авторизацию или ограничил выдачу. Войдите в открытом Chrome и нажмите «Продолжить после входа» в панели.'
+        self._progress(message, waiting=True)
+        logger().warning('session=%s waiting for manual login timeout=%s', self.session_id, self.settings.browser_wait_seconds)
+        until = time.monotonic() + self.settings.browser_wait_seconds
+        try:
+            while time.monotonic() < until:
+                self._check()
+                if self.control.resume.wait(.25):
+                    return True
+            self.log('Время ожидания входа истекло. Прогресс сохранён; окно Chrome остаётся для диагностики.')
+            return False
+        finally:
+            self.control.update(session_id=self.session_id, stage=self.stage, waiting=False, message='Ожидание входа завершено')
+
+    @diagnosed('load_search_form')
     def _load_form(self):
         from selenium.webdriver.common.by import By
+        self._progress('Загружаю форму TGStat. При проверке сайта используйте открытый Chrome.')
         self.driver.get("https://tgstat.ru/channels/search")
         self._wait(lambda d: d.find_element(By.ID, "q").is_displayed() and
                    d.execute_script("return document.readyState==='complete' && window.jQuery && jQuery.active===0"), 90)
 
+    @diagnosed('read_categories')
     def read_categories(self):
         """Read actual option IDs/labels; no search is submitted."""
         self._check()
@@ -115,6 +173,8 @@ class TGStatSearch:
         snapshot = validate_categories({'schema_version': 1, 'source': 'https://tgstat.ru/channels/search',
                                        'observed_at': datetime.now(timezone.utc).isoformat(), **options})
         atomic_json(CACHE_PATH, snapshot)
+        logger().info('session=%s category options=%s countries=%s languages=%s', self.session_id,
+                      len(options['categories']), len(options['countries']), len(options['languages']))
         self.current_query, self.current_page = None, -1
         return snapshot
 
@@ -181,6 +241,7 @@ class TGStatSearch:
         if errors:
             raise RuntimeError('Фильтры TGStat изменились или не применились: ' + ', '.join(errors) + '. Поиск остановлен.')
 
+    @diagnosed('apply_search_filters')
     def _reset(self, query):
         from selenium.webdriver.common.by import By
         self._load_form()
@@ -191,6 +252,7 @@ class TGStatSearch:
         if category_id is None:
             spec['text']['q'] = query
         self._apply_filters(spec)
+        self._progress('Фильтры применены. Запрашиваю каналы выбранной тематики…')
         self.current_query, self.current_page = query, 0
         return self._request(self.driver.find_element(By.ID, "search-form-submit-btn"))
 
@@ -216,7 +278,20 @@ class TGStatSearch:
         from selenium.webdriver.common.by import By
         return next((b for b in self.driver.find_elements(By.CSS_SELECTOR, ".lm-button") if b.is_displayed() and b.is_enabled()), None)
 
+    @diagnosed('fetch_category_page')
     def fetch(self, query, page=0):
+        for attempt in range(3):
+            try:
+                result = self._fetch(query, page)
+                logger().info('session=%s category=%s page=%s found=%s exhausted=%s restricted=%s',
+                              self.session_id, query, page, len(result['usernames']), result['exhausted'], result.get('restricted'))
+                return result
+            except RetryAfterLogin:
+                self.current_query, self.current_page = None, -1
+                self._progress('Повторяю поиск после ручного входа…')
+        return {'usernames': [], 'exhausted': True, 'restricted': True}
+
+    def _fetch(self, query, page=0):
         self._check()
         before_unavailable = len(self._unavailable_urls)
         if self.driver is None:
@@ -243,13 +318,18 @@ class TGStatSearch:
         return {"usernames": result, "exhausted": self._more() is None, "restricted": False,
                 'without_public_username': len(self._unavailable_urls) - before_unavailable}
 
-    def close(self):
+    def close(self, force=False):
         if self.driver:
+            if self.preserve_on_close and self.settings.keep_browser_on_error and not force:
+                retain(self)
+                self._progress('Chrome оставлен открытым для диагностики. Закрыть его можно в разделе Dev-диагностики.')
+                return
             try:
                 self.driver.quit()
             except Exception:
-                pass
+                logger().exception('session=%s browser close failed', self.session_id)
             self.driver = None
+            logger().info('session=%s browser closed', self.session_id)
 
     def __exit__(self, *args):
         self.close()

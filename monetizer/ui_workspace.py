@@ -1,7 +1,6 @@
 """Database, history and offline batch controls. Never starts a server or browser."""
 import json
 
-import pandas as pd
 import streamlit as st
 
 from .batch import create_batch, batch_zip, batch_prompt, preview_response, import_response
@@ -30,6 +29,7 @@ def show_evidence(row):
 
 
 def database_panel(runner, running):
+    import pandas as pd
     rows = runner.repo.list_channels()
     if not rows:
         st.info("База пока пуста")
@@ -83,6 +83,7 @@ def database_panel(runner, running):
 
 
 def history_panel(runner, running):
+    import pandas as pd
     runs = runner.repo.list_runs()
     if not runs:
         st.info("История запусков пуста")
@@ -101,6 +102,7 @@ def history_panel(runner, running):
 
 
 def batch_panel(runner, running):
+    import pandas as pd
     state = runner.snapshot()
     if state.get("run_id") and state["rows"]:
         size = st.selectbox("Каналов в пакете", [10, 20])
@@ -132,15 +134,8 @@ def batch_panel(runner, running):
             st.error(f"Импорт отклонён без изменения базы: {exc}")
 
 
-def render_workspace(runner):
+def render_workspace(runner, section):
     running = runner.snapshot()["status"] in ("running", "stopping")
-    with st.expander("База кандидатов, история и пакетный разбор", expanded=False):
-        database, history, batch, quality = st.tabs(["База кандидатов", "История запусков", "Пакет ChatGPT", "Качество отбора"])
-        with database:
-            database_panel(runner, running)
-        with history:
-            history_panel(runner, running)
-        with batch:
-            batch_panel(runner, running)
-        with quality:
-            quality_panel(runner.repo, running)
+    panels = {'База кандидатов': database_panel, 'История запусков': history_panel,
+              'Пакет ChatGPT': batch_panel, 'Качество отбора': lambda r, active: quality_panel(r.repo, active)}
+    panels[section](runner, running)
