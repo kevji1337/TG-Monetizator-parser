@@ -26,6 +26,7 @@ COLUMNS = {
     "work_status_label": "Рабочий статус", "notes": "Заметки", "ai_review": "Отдельная оценка AI",
     "source_categories": "Тематики TGStat",
     'tgstat_filters': 'Фильтры поиска TGStat',
+    'assessment_stale': 'Автооценка устарела',
 }
 
 

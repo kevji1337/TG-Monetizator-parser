@@ -2,6 +2,7 @@
 import json
 import hashlib
 import re
+from functools import lru_cache
 from pathlib import Path
 from .catalog import load_catalog
 
@@ -42,6 +43,7 @@ def _tokens(value):
     return re.findall(r"[a-zа-я0-9]+", str(value).casefold().replace("ё", "е"))
 
 
+@lru_cache(maxsize=8192)
 def _stem(word):
     if len(word) < 5 or not re.fullmatch(r"[а-я]+", word):
         return word

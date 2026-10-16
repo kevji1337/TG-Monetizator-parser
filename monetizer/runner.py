@@ -64,6 +64,8 @@ class RunGuard:
 
 class JobRunner:
     def __init__(self, checkpoint=None, database=None):
+        started = time.perf_counter()
+        logger().info('runner startup started')
         self.checkpoint = Path(checkpoint) if checkpoint else RESULTS_DIR / "checkpoint.json"
         self.repo = Repository(database or self.checkpoint.with_name("monetizer.sqlite3"))
         self.lock, self.stop_event = threading.Lock(), threading.Event()
@@ -94,23 +96,33 @@ class JobRunner:
                     loaded.update(status="interrupted", stage="Сохранён незавершённый запуск")
                 self.state.update(loaded)
                 settings = Settings.from_saved(self.state["settings"])
-                original_rows = self.state['rows']
-                self.state["rows"] = [self._evaluate(r, settings) for r in original_rows]
-                if interrupted or original_rows != self.state['rows']:
+                self._mark_pending(settings)
+                if interrupted:
                     self.repo.save_state(self.state)
         except (ValueError, KeyError, TypeError, OSError) as exc:
             self.state["error"] = f"Не удалось прочитать сохранённый запуск: {exc}"
         finally:
             if startup_guard:
                 startup_guard.__exit__()
+            logger().info('runner startup completed elapsed=%.3fs rows=%s pending=%s',
+                          time.perf_counter() - started, len(self.state['rows']), self.state.get('assessment_pending', 0))
 
-    def _evaluate(self, row, settings):
+    def _signature(self, row, settings, profile):
+        return hashlib.sha256(dumps([content_hash(row), settings.to_dict(), self.state.get('niche', ''),
+                                     RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, profile_version(profile),
+                                     datetime.now(timezone.utc).date().isoformat()]).encode()).hexdigest()
+
+    def _mark_pending(self, settings):
         profile = load_profile(self.repo)
-        signature = hashlib.sha256(dumps([content_hash(row), settings.to_dict(), self.state.get('niche', ''),
-                                         RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, profile_version(profile),
-                                         datetime.now(timezone.utc).date().isoformat()]).encode()).hexdigest()
+        for row in self.state['rows']:
+            row['assessment_stale'] = row.get('_evaluation_signature') != self._signature(row, settings, profile)
+        self.state['assessment_pending'] = sum(r['assessment_stale'] for r in self.state['rows'])
+
+    def _evaluate(self, row, settings, profile=None):
+        profile = load_profile(self.repo) if profile is None else profile
+        signature = self._signature(row, settings, profile)
         if row.get('_evaluation_signature') == signature:
-            return copy.deepcopy(row)
+            return {**copy.deepcopy(row), 'assessment_stale': False}
         row = qualify(reassess_metrics(row, settings), self.state.get("niche", ""), settings.niche_id,
                       settings.micro_id, settings.category_ids)
         if not row.get("pitch_edited"):
@@ -118,7 +130,37 @@ class JobRunner:
             row.update(pitch=draft["message"], pitch_scenario=draft["scenario_id"],
                        pitch_source=(draft["source"] or {}).get("id", ""), pitch_rule_version=PLAYBOOK_VERSION)
         row['_evaluation_signature'] = signature
+        row['assessment_stale'] = False
         return row
+
+    def _refresh_rows(self, settings, progress=None, cancellable=False):
+        started = time.perf_counter()
+        profile = load_profile(self.repo)
+        refreshed, total = [], len(self.state['rows'])
+        logger().info('run=%s reassessment started rows=%s', self.state.get('run_id'), total)
+        for index, row in enumerate(self.state['rows'], 1):
+            if cancellable and self.stop_event.is_set():
+                raise Cancelled()
+            refreshed.append(self._evaluate(row, settings, profile))
+            if progress:
+                progress(index, total)
+            if index % 10 == 0 or index == total:
+                logger().info('run=%s reassessment progress=%s/%s elapsed=%.3fs',
+                              self.state.get('run_id'), index, total, time.perf_counter() - started)
+            if cancellable:
+                with self.lock:
+                    self.state['stage'] = f'Пересчёт сохранённых оценок: {index}/{total}'
+        with self.lock:
+            self.state['rows'] = refreshed
+            self.state['assessment_pending'] = 0
+        logger().info('run=%s reassessment completed elapsed=%.3fs', self.state.get('run_id'), time.perf_counter() - started)
+
+    def reassess_saved_run(self, progress=None):
+        if self.state['status'] in ('running', 'stopping'):
+            raise RuntimeError('Сначала остановите поиск')
+        with RunGuard(self.repo.path):
+            self._refresh_rows(Settings.from_saved(self.state['settings']), progress)
+            self._persist()
 
     def _browser_state(self, state):
         with self.lock:
@@ -143,6 +185,7 @@ class JobRunner:
         return state
 
     def _stats(self):
+        self.state['assessment_pending'] = sum(bool(r.get('assessment_stale')) for r in self.state['rows'])
         for row in self.state["rows"]:
             sources = self.state['candidates'].get(row['username'].lstrip('@'), [])
             row['source_queries'] = ' | '.join(q for q in sources if not q.startswith('tgstat:'))
@@ -154,7 +197,7 @@ class JobRunner:
                 row['tgstat_filters']['selects']['categories'] = category_sources
         for query, stats in self.state.get("query_stats", {}).items():
             rows = [r for r in self.state["rows"] if query in self.state["candidates"].get(r["username"].lstrip("@"), [])]
-            stats.update(audited=len(rows), qualified=sum(r["status"] in ("top", "recommended") for r in rows),
+            stats.update(audited=len(rows), qualified=sum(not r.get('assessment_stale') and r["status"] in ("top", "recommended") for r in rows),
                          errors=sum(r["status"] == "error" for r in rows))
             stats["yield_percent"] = round(stats["qualified"] / len(rows) * 100, 1) if rows else 0.0
             stats["audit_seconds"] = round(sum(r.get("audit_seconds", 0) for r in rows), 3)
@@ -205,6 +248,7 @@ class JobRunner:
                               "queue": list(usernames), "query_state": {}, "query_stats": {}, "elapsed_seconds": 0,
                               "started_at": datetime.now(timezone.utc).isoformat()}
             self.state["settings"] = settings.to_dict()
+            self._mark_pending(settings)
             # Legacy checkpoints have no page cursor; restart discovery while keeping known candidates.
             done = {r["username"].lstrip("@") for r in self.state["rows"]}
             self.state["queue"] = [u for u in self.state["candidates"] if u not in done]
@@ -339,6 +383,10 @@ class JobRunner:
         reason, failure = "exhausted", ""
         deadline = self._active_started + max(0, settings.max_minutes * 60 - self._base_elapsed)
         try:
+            # Resume must use current evaluations before counting the target.
+            # This runs in the job thread, never inside get_runner().
+            if self.state['rows']:
+                self._refresh_rows(settings, cancellable=True)
             search = TGStatSearch(settings, self.stop_event, self.log, deadline, self.browser_control)
             excluded = self.repo.processed() if settings.new_only and not self.state.get("manual") else set()
             history = self.repo.query_history(self.state.get("query_scope", ""), self.state.get("run_id"))
@@ -473,5 +521,5 @@ class JobRunner:
                 if self.state["status"] in ("running", "stopping"):
                     self.state.update(status="interrupted", stage="Сохранён незавершённый запуск")
                 settings = Settings.from_saved(self.state["settings"])
-                self.state["rows"] = [self._evaluate(row, settings) for row in self.state["rows"]]
+                self._mark_pending(settings)
             self._persist()

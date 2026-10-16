@@ -3,7 +3,7 @@ import copy
 import re
 from functools import lru_cache
 
-from .keywords import MICRO_NICHES, get_micro_niches, resolve_micro_niches, _tokens, _same_word
+from .keywords import MICRO_NICHES, get_micro_niches, resolve_micro_niches, _tokens, _same_word, _stem
 from .pitches import evidence_sources
 from .categories import assessment_profiles
 
@@ -62,10 +62,32 @@ def _word_spans(text):
     return tuple((_tokens(t.group())[0], t.start(), t.end()) for t in re.finditer(r"[a-zа-яё0-9]+", text, re.I))
 
 
+@lru_cache(maxsize=256)
+def _word_index(text):
+    index = {}
+    for position, (word, _, _) in enumerate(_word_spans(text)):
+        stem = _stem(word)
+        # _same_word permits prefix matches only when both stems have >=5 letters.
+        key = stem[:5] if len(stem) >= 5 else stem
+        index.setdefault(key, []).append(position)
+    return index
+
+
+@lru_cache(maxsize=2048)
+def _term_tokens(term):
+    return tuple(_tokens(term))
+
+
 def _term_span(term, text):
-    needle = _tokens(term)
+    needle = _term_tokens(term)
+    if not needle:
+        return None
     tokens = _word_spans(text)
-    for i in range(len(tokens) - len(needle) + 1) if needle else ():
+    stem = _stem(needle[0])
+    key = stem[:5] if len(stem) >= 5 else stem
+    for i in _word_index(text).get(key, ()):
+        if i + len(needle) > len(tokens):
+            continue
         if all(_same_word(a, b[0]) for a, b in zip(needle, tokens[i:i + len(needle)])):
             return tokens[i][1], tokens[i + len(needle) - 1][2]
     return None

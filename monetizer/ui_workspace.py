@@ -6,11 +6,17 @@ import streamlit as st
 from .batch import create_batch, batch_zip, batch_prompt, preview_response, import_response
 from .export import csv_bytes, xlsx_bytes
 from .repository import WORK_STATUSES
-from .qualification import TYPE_LABELS, CONTENT_LABELS
+from .qualification import TYPE_LABELS, CONTENT_LABELS, RULE_VERSION
+
+
+def assessment_stale(row):
+    return bool(row.get('assessment_stale') or row.get('classification', {}).get('rule_version') != RULE_VERSION)
 from .ui_quality import quality_panel
 
 
 def show_evidence(row):
+    if assessment_stale(row):
+        st.warning('Автоматическая оценка устарела. Откройте нужный запуск из истории и пересчитайте сохранённые оценки в разделе «Поиск».')
     st.caption("Тип: " + TYPE_LABELS.get(row.get("channel_type"), "Не установлено") + " · Тематика: " + row.get("relevance", "unknown"))
     st.link_button("Посмотреть публичную ленту Telegram", 'https://t.me/s/' + row['username'].lstrip('@'))
     classification = row.get('classification', {})
@@ -56,7 +62,8 @@ def database_panel(runner, running):
     visible = [r for r in rows if (not status_filter or r["work_status"] in status_filter)
                and (not hide_non_target or (r.get('channel_type') or 'unknown') in ('expert', 'unknown'))
                and (not search or search.casefold() in (r.get("title", "") + r["username"]).casefold())]
-    st.dataframe(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"), "Отбор": r.get("verdict"),
+    st.dataframe(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"),
+                               "Отбор": '⏳ Оценка устарела' if assessment_stale(r) else r.get("verdict"),
                                "Тип": TYPE_LABELS.get(r.get('channel_type'), 'Не установлено'),
                                "Работа": WORK_STATUSES[r["work_status"]], "Заметка": r["notes"]} for r in visible]), hide_index=True, width="stretch")
     if not visible:

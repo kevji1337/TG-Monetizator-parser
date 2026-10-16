@@ -28,7 +28,7 @@ PAGE_STARTED = time.perf_counter()
 st.set_page_config(page_title="Монетизатор · Telegram", page_icon="🔎", layout="wide")
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner='Загружаю сохранённый запуск…')
 def get_runner():
     return JobRunner()
 
@@ -159,13 +159,22 @@ def results_panel():
     state = runner.snapshot()
     running = state["status"] in ("running", "stopping")
     count_found, rows = len(state["candidates"]), sorted_rows(state["rows"])
-    green = sum(r.get("status") in ("top", "recommended") for r in rows)
+    green = sum(not r.get('assessment_stale') and r.get("status") in ("top", "recommended") for r in rows)
     metrics = st.columns(4)
     metrics[0].metric("Найдено", count_found)
     metrics[1].metric("Проверено", len(rows))
     metrics[2].metric("Подходящие / цель", f"{green} / {state.get('settings', {}).get('target_count', 30)}")
     metrics[3].metric("Ошибки доступа", sum(r.get("status") == "error" for r in rows))
     st.write(f"**{state['stage']}**")
+    if state.get('assessment_pending'):
+        st.warning(f"Устарели автоматические оценки {state['assessment_pending']} каналов. Они не засчитываются в цель, пока не выполнен пересчёт.")
+        if st.button('Пересчитать сохранённые оценки', disabled=running or state.get('external_owner', False)):
+            progress = st.progress(0.0, text='Пересчёт по сохранённым текстам, без загрузки Telegram…')
+            try:
+                runner.reassess_saved_run(lambda done, total: progress.progress(done / total, text=f'Пересчитано {done}/{total}'))
+                st.rerun()
+            except (ValueError, RuntimeError, OSError) as exc:
+                st.error(f'Не удалось пересчитать оценки: {exc}')
     st.caption('Автоматические CSV и Excel: ' + str(REPORTS_DIR))
     with st.expander('Что означают статусы каналов'):
         st.markdown('''
@@ -227,7 +236,7 @@ def results_panel():
     only_contact = filter_columns[1].checkbox("С кандидатом контакта")
     search = filter_columns[2].text_input("Поиск в результатах", placeholder="Название или @username")
     hide_non_target = st.checkbox('Скрыть новости, агрегаторы, школы, бренды, магазины и доски вакансий', value=True)
-    selected = [r for r in rows if (not only_green or r.get("status") in ("top", "recommended"))
+    selected = [r for r in rows if (not only_green or (not r.get('assessment_stale') and r.get("status") in ("top", "recommended")))
                 and (not hide_non_target or (r.get('channel_type') or 'unknown') in ('expert', 'unknown'))
                 and (not only_contact or r.get("author_contact"))
                 and (not search or search.casefold() in f"{r.get('title', '')} {r['username']}".casefold())]
@@ -235,7 +244,8 @@ def results_panel():
     st.caption('Неопределённые каналы остаются с жёлтой меткой; они не входят в цель поиска. Снимите фильтр, чтобы увидеть отклонённые типы и основания.')
     visible = ["verdict", "channel_type", "title", "username", "subs", "avg_views", "median_views", "view_ratio", "freq",
                "last_post", "youtube", "instagram", "author_contact", "reasons", "link"]
-    frame = pd.DataFrame([{COLUMNS[k]: TYPE_LABELS.get(r.get(k), 'Не установлено') if k == 'channel_type' else r.get(k)
+    frame = pd.DataFrame([{COLUMNS[k]: '⏳ Оценка устарела' if k == 'verdict' and r.get('assessment_stale') else
+                           TYPE_LABELS.get(r.get(k), 'Не установлено') if k == 'channel_type' else r.get(k)
                            for k in visible} for r in selected], columns=[COLUMNS[k] for k in visible])
     st.dataframe(frame, hide_index=True, width="stretch",
                  column_config={COLUMNS[k]: st.column_config.LinkColumn(COLUMNS[k]) for k in ("link", "youtube", "instagram")})
