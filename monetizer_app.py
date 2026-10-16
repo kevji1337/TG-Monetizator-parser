@@ -7,7 +7,7 @@ import time
 
 import streamlit as st
 
-from monetizer.export import COLUMNS, csv_bytes, xlsx_bytes
+from monetizer.export import COLUMNS, csv_bytes, xlsx_bytes, REPORTS_DIR
 from monetizer.audit import WebAuditor
 from monetizer.keywords import MICRO_NICHES
 from monetizer.categories import load_categories, category_label, assessment_profiles
@@ -164,6 +164,18 @@ def results_panel():
     metrics[2].metric("Подходящие / цель", f"{green} / {state.get('settings', {}).get('target_count', 30)}")
     metrics[3].metric("Ошибки доступа", sum(r.get("status") == "error" for r in rows))
     st.write(f"**{state['stage']}**")
+    st.caption('Автоматические CSV и Excel: ' + str(REPORTS_DIR))
+    with st.expander('Что означают статусы каналов'):
+        st.markdown('''
+| Статус | Значение |
+| --- | --- |
+| 🟢 РЕКОМЕНДОВАН | Подходят метрики, есть признаки личного эксперта и соответствие теме. Предварительный отбор. |
+| 🟢 ТОП | Тот же отбор плюс ссылка YouTube или Instagram. Принадлежность ссылки и наличие воронки требуют проверки. |
+| 🟡 Требует проверки | Недостаточно данных, признаки конфликтуют или есть сомнения в регулярности публикаций. |
+| 🚩 Не прошёл отбор | Не выполнен числовой критерий, не совпадает тема или определён нецелевой тип канала. |
+| ⚪ Не удалось проверить | Ошибка доступа/загрузки или нет публичного превью. Это не оценка качества канала. |
+''')
+        st.caption('Конкретное основание — в столбце «Основания» и карточке канала. Рабочие статусы «Написал», «Ответил» и другие задаются вручную, отдельно от автоотбора.')
     if state.get('browser', {}).get('waiting'):
         st.warning(state['browser']['message'])
         if st.button('Продолжить после входа', key='search_resume'):

@@ -1,13 +1,13 @@
 import csv
 import io
 import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = PROJECT_ROOT / "results" / "monetizer"
+REPORTS_DIR = PROJECT_ROOT / 'reports'
 COLUMNS = {
     "verdict": "Вердикт", "username": "Канал", "title": "Название", "subs": "Подписчики",
     "avg_views": "Средние просмотры поста", "median_views": "Медиана просмотров",
@@ -88,36 +88,23 @@ def atomic_json(path, data):
     temporary.replace(path)
 
 
-def desktop_directory():
-    if os.name == "nt":
-        import winreg
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
-                return Path(os.path.expandvars(winreg.QueryValueEx(key, "Desktop")[0]))
-        except OSError:
-            pass
-    return Path.home() / "Desktop"
-
-
 def report_stem(niche):
     name = re.sub(r"[^\wа-яА-ЯёЁ-]+", "_", niche, flags=re.UNICODE).strip("_")[:65] or "каналы"
     return f"Монетизация_{name}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
 
-def save_reports(rows, niche, copy_to_desktop=True):
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+def save_reports(rows, niche):
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     stem = report_stem(niche)
     payloads = {"csv": csv_bytes(rows), "xlsx": xlsx_bytes(rows)}
     paths, warnings = [], []
-    directories = [RESULTS_DIR] + ([desktop_directory()] if copy_to_desktop else [])
-    for directory in directories:
-        for extension, data in payloads.items():
-            path = directory / f"{stem}.{extension}"
-            try:
-                path.write_bytes(data)
-                paths.append(str(path))
-            except OSError as exc:
-                warnings.append(f"Не удалось сохранить {path}: {exc}")
+    for extension, data in payloads.items():
+        path = REPORTS_DIR / f"{stem}.{extension}"
+        try:
+            path.write_bytes(data)
+            paths.append(str(path))
+        except OSError as exc:
+            warnings.append(f"Не удалось сохранить {path}: {exc}")
     if not paths:
         raise OSError("; ".join(warnings))
     return paths, warnings
