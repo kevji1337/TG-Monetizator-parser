@@ -1,4 +1,8 @@
 from dataclasses import asdict, dataclass
+from urllib.parse import urlsplit
+
+AI_BASE_URL = 'https://gemini-api.osante.xyz/v1'
+AI_MODEL = 'gemini-4-argon-thinking'
 
 
 @dataclass(frozen=True)
@@ -48,8 +52,22 @@ class Settings:
     dev_mode: bool = False
     keep_browser_on_error: bool = True
     browser_wait_seconds: int = 300
+    ai_enabled: bool = False
+    ai_base_url: str = AI_BASE_URL
+    ai_model: str = AI_MODEL
+    ai_max_audits: int = 5
+    ai_timeout: int = 120
 
     def __post_init__(self):
+        endpoint = urlsplit(self.ai_base_url)
+        if (endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username or endpoint.password
+                or endpoint.query or endpoint.fragment):
+            raise ValueError('Base URL AI: нужен HTTPS-адрес без ключа, параметров или пароля')
+        if type(self.ai_enabled) is not bool or type(self.ai_max_audits) is not int or not 1 <= self.ai_max_audits <= 5:
+            raise ValueError('AI: включение — флаг; лимит — от 1 до 5 запросов за запуск')
+        if (not isinstance(self.ai_model, str) or not self.ai_model.strip() or len(self.ai_model) > 160
+                or type(self.ai_timeout) is not int or not 10 <= self.ai_timeout <= 180):
+            raise ValueError('AI: укажите Model ID и таймаут 10–180 секунд')
         if self.search_mode not in ('categories', 'keywords', 'manual'):
             raise ValueError('Неизвестный способ поиска')
         if type(self.browser_wait_seconds) is not int or not 0 <= self.browser_wait_seconds <= 1800:

@@ -2,10 +2,12 @@
 import copy
 import hashlib
 import json
+import os
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,12 +23,15 @@ from .settings import Settings
 from .categories import category_key, category_label, category_id_from_key, CATEGORY_RULES_VERSION
 from .tgstat_filters import filter_spec
 from .diagnostics import BrowserControl, logger
+from .ai_audit import ProxyAuditor, apply_assessment, PROMPT_VERSION
 
 RANK = {"top": 0, "recommended": 1, "review": 2, "rejected": 3, "error": 4}
 STOP_LABELS = {"target_reached": "Цель достигнута", "exhausted": "Доступная выдача исчерпана",
                "restricted": "TGStat ограничил выдачу: требуется вход или достигнут лимит доступа", "audit_budget": "Достигнут лимит аудитов",
                "time_budget": "Достигнут лимит времени", "cancelled": "Остановлено пользователем",
-               "manual_exhausted": "Ручной аудит завершён", "error": "Ошибка выполнения"}
+               "manual_exhausted": "Ручной аудит завершён", "error": "Ошибка выполнения",
+               'ai_budget': 'Достигнут лимит запросов AI за запуск; сохранён частичный результат',
+               'ai_unavailable': 'AI-прокси недоступен; сохранён частичный результат'}
 
 
 def sorted_rows(rows):
@@ -72,6 +77,7 @@ class JobRunner:
         self.thread, self._active_started = None, None
         self._external_owner = False
         self._base_elapsed = 0.0
+        self._api_auditor = None
         self.browser_control = BrowserControl(self._browser_state)
         self.state = {"status": "idle", "stage": "Готов к запуску", "rows": [], "candidates": {},
                       "logs": [], "paths": [], "error": "", "search_complete": False}
@@ -109,7 +115,7 @@ class JobRunner:
 
     def _signature(self, row, settings, profile):
         return hashlib.sha256(dumps([content_hash(row), settings.to_dict(), self.state.get('niche', ''),
-                                     RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, profile_version(profile),
+                                     RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, PROMPT_VERSION, profile_version(profile),
                                      datetime.now(timezone.utc).date().isoformat()]).encode()).hexdigest()
 
     def _mark_pending(self, settings):
@@ -121,7 +127,7 @@ class JobRunner:
     def _evaluate(self, row, settings, profile=None):
         profile = load_profile(self.repo) if profile is None else profile
         signature = self._signature(row, settings, profile)
-        if row.get('_evaluation_signature') == signature:
+        if row.get('_evaluation_signature') == signature and not settings.ai_enabled and not row.get('api_ai_review'):
             return {**copy.deepcopy(row), 'assessment_stale': False}
         row = qualify(reassess_metrics(row, settings), self.state.get("niche", ""), settings.niche_id,
                       settings.micro_id, settings.category_ids)
@@ -129,6 +135,7 @@ class JobRunner:
             draft = compose_pitch(row, self.state.get("niche", ""), profile=profile)
             row.update(pitch=draft["message"], pitch_scenario=draft["scenario_id"],
                        pitch_source=(draft["source"] or {}).get("id", ""), pitch_rule_version=PLAYBOOK_VERSION)
+        row = apply_assessment(row, settings, self.state.get('niche', ''), profile)
         row['_evaluation_signature'] = signature
         row['assessment_stale'] = False
         return row
@@ -182,6 +189,9 @@ class JobRunner:
             if self._active_started is not None:
                 state["elapsed_seconds"] = self._base_elapsed + time.monotonic() - self._active_started
         state["rows"] = self.repo.enrich_rows(state["rows"])
+        if state.get('run_id') and state.get('settings', {}).get('ai_enabled'):
+            with self.repo.connect() as db:
+                state['ai_requests_used'] = db.execute('SELECT count(*) FROM api_ai_attempts WHERE run_id=?', (state['run_id'],)).fetchone()[0]
         return state
 
     def _stats(self):
@@ -215,7 +225,7 @@ class JobRunner:
         with self.lock:
             self.state["logs"] = (self.state["logs"] + [f"{datetime.now().strftime('%H:%M:%S')}  {message}"])[-300:]
 
-    def start(self, settings=None, queries=None, niche="", usernames=None, resume=False):
+    def start(self, settings=None, queries=None, niche="", usernames=None, resume=False, api_key=None):
         with self.lock:
             if self.state["status"] in ("running", "stopping") or (self.thread and self.thread.is_alive()):
                 raise RuntimeError("Задача уже выполняется")
@@ -235,6 +245,9 @@ class JobRunner:
                     raise ValueError("Выберите тематики TGStat или добавьте каналы")
                 if len(queries) > 50:
                     raise ValueError("Допустимо не более 50 запросов")
+            runtime_key = (api_key or os.environ.get('MONETIZER_AI_KEY', '')).strip()
+            if settings.ai_enabled and not runtime_key:
+                raise ValueError('Введите API-ключ в разделе «AI-аудит Gemini» или задайте MONETIZER_AI_KEY')
             guard = RunGuard(self.repo.path)
             guard.__enter__()
             if not resume:
@@ -249,6 +262,7 @@ class JobRunner:
                               "started_at": datetime.now(timezone.utc).isoformat()}
             self.state["settings"] = settings.to_dict()
             self._mark_pending(settings)
+            self._api_auditor = ProxyAuditor(self.repo, settings, runtime_key, self.stop_event, self.log) if settings.ai_enabled else None
             # Legacy checkpoints have no page cursor; restart discovery while keeping known candidates.
             done = {r["username"].lstrip("@") for r in self.state["rows"]}
             self.state["queue"] = [u for u in self.state["candidates"] if u not in done]
@@ -346,6 +360,15 @@ class JobRunner:
             logger().exception('run=%s audit worker failed', self.state.get('run_id'))
             row = error_row(username, "worker_error", str(exc))
         row = self._evaluate(row, settings)
+        if settings.ai_enabled and self._api_auditor:
+            self._persist()  # Record current progress before a potentially slow proxy call.
+            with self.lock:
+                self.state['stage'] = f"AI-анализ {row['username']}"
+            row = self._api_auditor.audit(row, self.state['run_id'], self.state.get('niche', ''),
+                                          load_profile(self.repo), self._active_started + max(0, settings.max_minutes * 60 - self._base_elapsed))
+            row = self._evaluate(row, settings)
+            with self.lock:
+                self.state['stage'] = 'Поиск и предварительный отбор'
         row["source_queries"] = " | ".join(self.state["candidates"][username])
         with self.lock:
             if not any(r["username"].lstrip("@") == username for r in self.state["rows"]):
@@ -374,6 +397,7 @@ class JobRunner:
             except Exception:
                 pass  # Database failure must not leave the OS run lock held.
         finally:
+            self._api_auditor = None
             self.guard.__exit__()
 
     def _execute(self):
@@ -387,6 +411,10 @@ class JobRunner:
             # This runs in the job thread, never inside get_runner().
             if self.state['rows']:
                 self._refresh_rows(settings, cancellable=True)
+            if settings.ai_enabled and self._api_auditor and self._api_auditor.used(self.state['run_id']) >= settings.ai_max_audits:
+                qualified = sum(r['status'] in ('top', 'recommended') for r in self.state['rows'])
+                reason = 'target_reached' if qualified >= settings.target_count and not self.state.get('manual') else 'ai_budget'
+                return
             search = TGStatSearch(settings, self.stop_event, self.log, deadline, self.browser_control)
             excluded = self.repo.processed() if settings.new_only and not self.state.get("manual") else set()
             history = self.repo.query_history(self.state.get("query_scope", ""), self.state.get("run_id"))
@@ -404,6 +432,16 @@ class JobRunner:
                 if qualified >= settings.target_count and not self.state.get("manual"):
                     reason = "target_reached"
                     break
+                if settings.ai_enabled and self._api_auditor:
+                    if self._api_auditor.disabled:
+                        reason = 'ai_unavailable'
+                        break
+                    if self.state.get('manual') and not pending and not self.state['queue']:
+                        reason = 'manual_exhausted'
+                        break
+                    if self._api_auditor.used(self.state['run_id']) >= settings.ai_max_audits:
+                        reason = 'ai_budget'
+                        break
                 if len(self.state["rows"]) >= settings.audit_budget:
                     reason = "audit_budget"
                     break
@@ -482,6 +520,12 @@ class JobRunner:
             row = next((r for r in self.state["rows"] if r["username"] == username), None)
             if row is None:
                 raise ValueError("Канал отсутствует в текущем отчёте")
+            if scenario_id == 'gemini_api':
+                updated = self._evaluate(row, Settings.from_saved(self.state['settings']))
+                review = updated.get('api_ai_review')
+                if not review or review.get('message') != message:
+                    raise ValueError('AI-черновик устарел: повторите аудит с текущими данными и профилем')
+                row.update(updated)
             if context:
                 row.update({k: context[k] for k in ("about_text", "content_samples", "youtube", "instagram") if k in context})
                 updated = self._evaluate(row, Settings.from_saved(self.state["settings"]))
@@ -506,6 +550,32 @@ class JobRunner:
                 auditor.close()
             self.state["rows"] = [r for r in self.state["rows"] if r["username"] != row["username"]] + [row]
             self.state["candidates"].setdefault(normalize_username(username), ["Повторный аудит"])
+            self._persist()
+            return self.repo.enrich_rows([row])[0]
+
+    def audit_with_ai(self, username, api_key, ai_config):
+        """Explicit AI audit of saved text; shares the original run's five-call cap."""
+        if self.state['status'] in ('running', 'stopping'):
+            raise RuntimeError('Сначала остановите поиск')
+        runtime_key = (api_key or os.environ.get('MONETIZER_AI_KEY', '')).strip()
+        if not runtime_key:
+            raise ValueError('Введите API-ключ в разделе «AI-аудит Gemini»')
+        allowed = {k: ai_config[k] for k in ('ai_base_url', 'ai_model', 'ai_max_audits', 'ai_timeout')}
+        with RunGuard(self.repo.path):
+            settings = replace(Settings.from_saved(self.state['settings']), ai_enabled=True, **allowed)
+            row = next((r for r in self.snapshot()['rows'] if r['username'] == username), None)
+            if row is None:
+                raise ValueError('Канал отсутствует в текущем запуске')
+            self.state['settings'] = settings.to_dict()
+            self._mark_pending(settings)
+            auditor = ProxyAuditor(self.repo, settings, runtime_key, threading.Event(), self.log)
+            row = self._evaluate(row, settings)
+            row = auditor.audit(row, self.state['run_id'], self.state.get('niche', ''), load_profile(self.repo))
+            row = self._evaluate(row, settings)
+            with self.lock:
+                self.state['rows'] = [row if r['username'] == username else r for r in self.state['rows']]
+            self._persist()
+            self._export()
             self._persist()
             return self.repo.enrich_rows([row])[0]
 

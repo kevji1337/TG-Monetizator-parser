@@ -42,6 +42,12 @@ class Repository:
                     PRIMARY KEY(batch_id,username));
                 CREATE TABLE IF NOT EXISTS imports(digest TEXT PRIMARY KEY, batch_id TEXT, imported_at TEXT);
                 CREATE INDEX IF NOT EXISTS idx_events_user ON events(username,id);
+                CREATE TABLE IF NOT EXISTS api_ai_cache(cache_key TEXT PRIMARY KEY, created_at REAL NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS api_ai_attempts(id INTEGER PRIMARY KEY, run_id TEXT NOT NULL,
+                    endpoint TEXT NOT NULL, cache_key TEXT NOT NULL, started_at REAL NOT NULL,
+                    status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '');
+                CREATE INDEX IF NOT EXISTS idx_api_ai_run ON api_ai_attempts(run_id);
+                CREATE INDEX IF NOT EXISTS idx_api_ai_time ON api_ai_attempts(endpoint,started_at);
                 PRAGMA user_version=1;
             """)
 

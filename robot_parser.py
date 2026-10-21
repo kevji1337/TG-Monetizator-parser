@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--include-known", action="store_true", help="Включать ранее обработанные каналы, используя кэш")
     parser.add_argument("--channels", nargs="+", help="Аудит @username без TGStat")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument('--ai', action='store_true', help='AI-аудит Gemini через прокси; ключ из MONETIZER_AI_KEY, максимум 5 запросов')
     args = parser.parse_args()
     categories = load_categories()['categories']
     if args.list_categories:
@@ -38,7 +39,8 @@ def main():
     runner = JobRunner()
     try:
         if args.resume:
-            runner.start(resume=True)
+            settings = Settings.from_saved({**runner.state.get('settings', {}), 'ai_enabled': True}) if args.ai else None
+            runner.start(settings=settings, resume=True)
         else:
             selected = args.categories or []
             if not selected and not args.channels:
@@ -62,6 +64,7 @@ def main():
             print('Тематики TGStat: ' + title + '. Текстовые запросы не используются.')
             runner.start(Settings(target_count=args.count, max_audits=args.max_audits, max_minutes=args.max_minutes,
                                   new_only=not args.include_known, micro_id=args.micro or '',
+                                  ai_enabled=args.ai,
                                   search_mode='manual' if args.channels else 'categories', category_ids=[c['id'] for c in resolved]),
                          niche=title, usernames=args.channels)
         last_log = None

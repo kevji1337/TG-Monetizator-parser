@@ -27,6 +27,8 @@ COLUMNS = {
     "source_categories": "Тематики TGStat",
     'tgstat_filters': 'Фильтры поиска TGStat',
     'assessment_stale': 'Автооценка устарела',
+    'ai_audit_status': 'Статус AI-аудита API', 'ai_detail': 'Причина пропуска или ошибки AI',
+    'api_ai_review': 'Разбор и черновик Gemini API', 'local_verdict': 'Вердикт локальных правил',
 }
 
 

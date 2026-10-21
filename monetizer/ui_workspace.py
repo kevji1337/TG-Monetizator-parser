@@ -7,17 +7,33 @@ from .batch import create_batch, batch_zip, batch_prompt, preview_response, impo
 from .export import csv_bytes, xlsx_bytes
 from .repository import WORK_STATUSES
 from .qualification import TYPE_LABELS, CONTENT_LABELS, RULE_VERSION
+from .ai_audit import STATUS_LABELS
+from .ui_quality import quality_panel
 
 
 def assessment_stale(row):
     return bool(row.get('assessment_stale') or row.get('classification', {}).get('rule_version') != RULE_VERSION)
-from .ui_quality import quality_panel
 
 
 def show_evidence(row):
     if assessment_stale(row):
         st.warning('Автоматическая оценка устарела. Откройте нужный запуск из истории и пересчитайте сохранённые оценки в разделе «Поиск».')
     st.caption("Тип: " + TYPE_LABELS.get(row.get("channel_type"), "Не установлено") + " · Тематика: " + row.get("relevance", "unknown"))
+    if row.get('ai_audit_status'):
+        st.caption('AI: ' + STATUS_LABELS.get(row['ai_audit_status'], row['ai_audit_status']) + ' · ' + row.get('ai_detail', ''))
+    api_review = row.get('api_ai_review')
+    if api_review:
+        with st.expander('Анализ Gemini через API', expanded=True):
+            st.text(api_review['reason'])
+            st.caption('Модель: ' + api_review.get('model', '') + ' · исходный вердикт правил: ' + row.get('local_verdict', ''))
+            for proof in api_review['evidence']:
+                st.text(proof['quote'])
+                st.caption(proof.get('date', '') + ' · ' + proof['url'])
+            if api_review['offers']:
+                st.json(api_review['offers'])
+            if api_review.get('message'):
+                st.text_area('Черновик Gemini — отдельно от сохранённого сообщения', api_review['message'], disabled=True)
+                st.download_button('Скачать черновик Gemini', api_review['message'], f"gemini_{row['username'].lstrip('@')}.txt", mime='text/plain')
     st.link_button("Посмотреть публичную ленту Telegram", 'https://t.me/s/' + row['username'].lstrip('@'))
     classification = row.get('classification', {})
     summary = classification.get('content_summary')

@@ -16,7 +16,8 @@ from monetizer.pitches import (generate_pitch, compose_pitch, evidence_sources, 
                               chatgpt_prompt, SCENARIOS, PLAYBOOK_VERSION)
 from monetizer.pitches import direct_scenario
 from monetizer.runner import JobRunner, sorted_rows
-from monetizer.settings import Settings
+from monetizer.settings import Settings, AI_BASE_URL, AI_MODEL
+from monetizer.ai_audit import STATUS_LABELS
 from monetizer.ui_workspace import render_workspace, show_evidence
 from monetizer.qualification import TYPE_LABELS
 from monetizer.ui_quality import profile_panel
@@ -47,6 +48,18 @@ section = st.radio('Раздел', ['Поиск', 'База кандидатов
 
 with st.sidebar:
     st.header("Новый поиск")
+    with st.expander('AI-аудит Gemini', expanded=True):
+        ai_enabled = st.checkbox('Анализировать посты через Gemini', value=True)
+        ai_key = st.text_input('API-ключ прокси', type='password', key='proxy_api_key',
+                               help='Только в памяти этой панели. После перезапуска введите заново; можно задать MONETIZER_AI_KEY.')
+        ai_base_url = st.text_input('Base URL AI', value=AI_BASE_URL)
+        ai_model = st.text_input('Model ID', value=AI_MODEL)
+        ai_max_audits = st.number_input('Максимум запросов AI за запуск', 1, 5, 5)
+        ai_timeout = st.number_input('Таймаут AI, секунд', 10, 180, 120, step=10)
+        st.caption('Через ваш gemini-web2api-go. Отправляются публичные посты, описание и профиль отправителя. '
+                   'Один запрос за раз; ошибки тоже расходуют лимит. Кэш действует 24 часа.')
+        st.caption('После остановки текущий запрос может ожидать ответа до таймаута. При недоступности модели канал остаётся на проверке.')
+    ai_config = dict(ai_base_url=ai_base_url, ai_model=ai_model, ai_max_audits=ai_max_audits, ai_timeout=ai_timeout)
     with st.expander('Режим разработки'):
         dev_mode = st.checkbox('Dev-режим', value=os.environ.get('MONETIZER_DEV') == '1')
         keep_browser = st.checkbox('Оставлять Chrome открытым при ошибке', value=True)
@@ -139,14 +152,15 @@ with st.sidebar:
                                 tgstat_min_avg_reach=tgstat_views_from, tgstat_max_avg_reach=tgstat_views_to,
                                 max_daily_reach=daily_to, min_ci=ci_from, max_ci=ci_to,
                                 exclude_dead=exclude_dead, exclude_scam=exclude_scam, exclude_red_label=exclude_red,
-                                dev_mode=dev_mode, keep_browser_on_error=keep_browser, browser_wait_seconds=browser_wait)
+                                dev_mode=dev_mode, keep_browser_on_error=keep_browser, browser_wait_seconds=browser_wait,
+                                ai_enabled=ai_enabled, **ai_config)
             usernames = re.split(r"[\s,;]+", channels_text.strip()) if channels_text.strip() else []
             if not mode.startswith("TGStat") and not usernames:
                 raise ValueError("Добавьте хотя бы один канал")
             run_topic = topic or 'Заданные каналы'
             if micro_id:
                 run_topic += ' · ' + MICRO_NICHES[micro_id]['title']
-            runner.start(settings, niche=run_topic, usernames=usernames)
+            runner.start(settings, niche=run_topic, usernames=usernames, api_key=ai_key)
             st.rerun()
         except (ValueError, RuntimeError, OSError) as exc:
             st.error(str(exc))
@@ -166,6 +180,9 @@ def results_panel():
     metrics[2].metric("Подходящие / цель", f"{green} / {state.get('settings', {}).get('target_count', 30)}")
     metrics[3].metric("Ошибки доступа", sum(r.get("status") == "error" for r in rows))
     st.write(f"**{state['stage']}**")
+    if state.get('settings', {}).get('ai_enabled'):
+        st.caption(f"AI-запросы: {state.get('ai_requests_used', 0)}/{state['settings'].get('ai_max_audits', 5)}. "
+                   'Кэш не расходует лимит. Зелёная метка требует проверенного ответа AI и подходящих метрик.')
     if state.get('assessment_pending'):
         st.warning(f"Устарели автоматические оценки {state['assessment_pending']} каналов. Они не засчитываются в цель, пока не выполнен пересчёт.")
         if st.button('Пересчитать сохранённые оценки', disabled=running or state.get('external_owner', False)):
@@ -208,8 +225,9 @@ def results_panel():
             try:
                 resume_config = {**state["settings"], "max_audits": audit_budget, "max_minutes": time_limit,
                                  "login_wait_seconds": 60 if login_pause else 0,
-                                 'dev_mode': dev_mode, 'keep_browser_on_error': keep_browser, 'browser_wait_seconds': browser_wait}
-                runner.start(settings=Settings.from_saved(resume_config), resume=True)
+                                 'dev_mode': dev_mode, 'keep_browser_on_error': keep_browser, 'browser_wait_seconds': browser_wait,
+                                 'ai_enabled': ai_enabled, **ai_config}
+                runner.start(settings=Settings.from_saved(resume_config), resume=True, api_key=ai_key)
                 st.rerun()
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(str(exc))
@@ -244,7 +262,10 @@ def results_panel():
     st.caption('Неопределённые каналы остаются с жёлтой меткой; они не входят в цель поиска. Снимите фильтр, чтобы увидеть отклонённые типы и основания.')
     visible = ["verdict", "channel_type", "title", "username", "subs", "avg_views", "median_views", "view_ratio", "freq",
                "last_post", "youtube", "instagram", "author_contact", "reasons", "link"]
+    if state.get('settings', {}).get('ai_enabled'):
+        visible.insert(2, 'ai_audit_status')
     frame = pd.DataFrame([{COLUMNS[k]: '⏳ Оценка устарела' if k == 'verdict' and r.get('assessment_stale') else
+                           STATUS_LABELS.get(r.get(k), '') if k == 'ai_audit_status' else
                            TYPE_LABELS.get(r.get(k), 'Не установлено') if k == 'channel_type' else r.get(k)
                            for k in visible} for r in selected], columns=[COLUMNS[k] for k in visible])
     st.dataframe(frame, hide_index=True, width="stretch",
@@ -259,7 +280,24 @@ def results_panel():
         st.subheader("Сообщение автору")
         chosen = st.selectbox("Канал для черновика", [r["username"] for r in selected])
         row = next(r for r in selected if r["username"] == chosen)
+        if st.button('AI-аудит этого канала по сохранённым постам', disabled=running or not ai_enabled):
+            try:
+                with st.spinner('Gemini анализирует тексты; используется лимит текущего запуска…'):
+                    result = runner.audit_with_ai(chosen, ai_key, ai_config)
+                if result.get('ai_audit_status') not in ('success', 'cached'):
+                    st.warning(STATUS_LABELS.get(result.get('ai_audit_status'), 'AI не выполнен') + ': ' + result.get('ai_detail', ''))
+                st.rerun()
+            except (ValueError, RuntimeError, OSError) as exc:
+                st.error(str(exc))
         show_evidence(row)
+        if row.get('api_ai_review', {}).get('message'):
+            if st.button('Принять черновик Gemini как сохранённое сообщение', disabled=running):
+                review = row['api_ai_review']
+                try:
+                    runner.save_pitch(chosen, review['message'], 'gemini_api', review['evidence'][0]['source_id'])
+                    st.rerun()
+                except (ValueError, RuntimeError, OSError) as exc:
+                    st.error(str(exc))
         context_key = f"content_{state.get('run_id')}_{chosen}"
         editor_row = {**row, **st.session_state.get(context_key, {})}
         st.caption("Редактор работает локально по загруженным сценариям. Для свободной AI-редактуры можно скачать промпт с данными канала и открыть его в ChatGPT или Claude.")
