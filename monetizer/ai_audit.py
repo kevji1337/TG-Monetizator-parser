@@ -6,6 +6,7 @@ Credentials live in process memory; responses must cite supplied source text.
 import copy
 import hashlib
 import json
+import re
 import time
 
 import requests
@@ -17,7 +18,7 @@ from .pitches import PLAYBOOK, PLAYBOOK_VERSION, evidence_sources
 from .qualification import CHANNEL_TYPES, RULE_VERSION, _independent_sources
 from .repository import dumps
 
-PROMPT_VERSION = 'expert-audit-1'
+PROMPT_VERSION = 'expert-audit-2'
 CACHE_SECONDS = 24 * 3600
 STATUS_LABELS = {
     'pending': 'Ожидает AI-аудита', 'success': 'Проверено AI', 'cached': 'AI из кэша',
@@ -64,10 +65,11 @@ def response_prompt(data, key):
         'Одних названия, просмотров, названия инструмента, «разбираю» или «показываю» недостаточно. '
         'Пересылки не доказывают практику автора. При конфликте или недостатке текстов — unknown. '
         'В reason объясни решение. Для определённого типа или темы приведи evidence: '
-        '[{"source_id":"ID из sources","url":"точный URL источника","quote":"дословная цитата до 1000 символов"}]. '
+        '[{"source_id":"точный ID из sources","quote":"короткая дословная цитата, желательно 80–250 символов"}]. '
+        'Ссылки url не составляй и не возвращай: программа подставит их по source_id. '
         'Цитаты нельзя перефразировать или соединять с многоточием. '
         'offers: [{kind: consultation|education|service|booking, ownership: self_reported|unknown|third_party, '
-        'source_id, url, quote, prices: [точные строки], booking_methods: [точные строки/ссылки]}]. '
+        'source_id, quote, prices: [точные строки], booking_methods: [точные строки/ссылки]}]. '
         'Чужие и пересланные предложения не приписывай автору. Отсутствие предложения в выборке '
         'не означает отсутствие продукта. Наличие продюсера неизвестно. '
         'message: для expert с matched — черновик первого сообщения до 1000 символов с конкретной '
@@ -82,6 +84,26 @@ def response_prompt(data, key):
     )
 
 
+def original_quote(quote, source_text):
+    """Resolve whitespace-only differences to an exact original substring.
+
+    No word, punctuation or case substitutions; no approximate text matching.
+    Saved evidence always contains the original source text, never the AI rewrite.
+    """
+    if quote in source_text:
+        return quote
+    needle = re.sub(r'\s+', ' ', quote).strip()
+    if not needle:
+        return None
+    spans = list(re.finditer(r'\s+|\S', source_text))
+    normalized = ''.join(' ' if match.group().isspace() else match.group() for match in spans)
+    offset = normalized.find(needle)
+    if offset < 0:
+        return None
+    result = source_text[spans[offset].start():spans[offset + len(needle) - 1].end()]
+    return result if len(result) <= 1000 else None
+
+
 def validate_review(value, data, key):
     if not isinstance(value, dict) or value.get('channel_id') != data['channel_id'] or value.get('input_hash') != key:
         raise ValueError('AI вернул чужой идентификатор или версию данных')
@@ -94,18 +116,23 @@ def validate_review(value, data, key):
     text(value.get('reason'), empty=False)
     text(value.get('message'), 1000)
     sources = {s['id']: s for s in data['sources']}
-    def proof(item):
+    canonical = {}
+    def proof(item, location):
         if not isinstance(item, dict) or not isinstance(item.get('source_id'), str) or item['source_id'] not in sources:
-            raise ValueError('AI указал неизвестный источник')
+            raise ValueError(f'AI указал неизвестный источник: {location}')
         source = sources[item['source_id']]
         quote = text(item.get('quote'), 1000, False)
-        if quote not in source['text'] or item.get('url') != source.get('url', ''):
-            raise ValueError('Цитата или ссылка AI не подтверждена')
+        actual = original_quote(quote, source['text'])
+        if actual is None:
+            raise ValueError(f"Цитата не найдена в тексте источника {source['id']}: {location}")
+        # URLs come from our own captured source, never from model-generated URLs.
+        canonical[id(item)] = {'source_id': source['id'], 'url': source.get('url', ''),
+                               'quote': actual, 'date': source.get('date', '')}
         return source
     evidence, offers = value.get('evidence'), value.get('offers')
     if not isinstance(evidence, list) or len(evidence) > 20 or not isinstance(offers, list) or len(offers) > 30:
         raise ValueError('AI вернул некорректные доказательства или офферы')
-    proofs = [proof(e) for e in evidence]
+    proofs = [proof(e, f'evidence[{index}]') for index, e in enumerate(evidence)]
     if (value['channel_type'] != 'unknown' or value['relevance'] != 'unknown') and not proofs:
         raise ValueError('Классификация AI требует цитат')
     if value['channel_type'] == 'expert':
@@ -116,23 +143,32 @@ def validate_review(value, data, key):
         raise ValueError('Сообщение допустимо только для подходящего эксперта с доказательствами')
     if any('(' not in claim and claim.casefold() in value['message'].casefold() for claim in PLAYBOOK['forbidden_claims']):
         raise ValueError('Сообщение AI содержит запрещённое утверждение')
-    for offer in offers:
-        source = proof(offer)
+    offer_values = {}
+    for index, offer in enumerate(offers):
+        source = proof(offer, f'offers[{index}]')
         if offer.get('kind') not in ('consultation', 'education', 'service', 'booking') or offer.get('ownership') not in ('self_reported', 'unknown', 'third_party'):
             raise ValueError('AI вернул неверный тип оффера')
         if source.get('forwarded') and offer['ownership'] == 'self_reported':
             raise ValueError('AI приписал автору пересланный оффер')
         for field in ('prices', 'booking_methods'):
             items = offer.get(field, [])
-            if not isinstance(items, list) or len(items) > 10 or any(not isinstance(v, str) or not v or (v not in offer['quote'] and v not in source.get('links', [])) for v in items):
+            if not isinstance(items, list) or len(items) > 10 or any(not isinstance(v, str) or not v for v in items):
                 raise ValueError('Цена или запись AI не подтверждена')
+            actual_values = []
+            for item in items:
+                actual = item if item in source.get('links', []) else original_quote(item, canonical[id(offer)]['quote'])
+                if actual is None:
+                    raise ValueError(f'Цена или запись AI не подтверждена: offers[{index}].{field}')
+                actual_values.append(actual)
+            offer_values[(id(offer), field)] = actual_values
     # Do not retain arbitrary fields returned by an untrusted model.
     result = {k: copy.deepcopy(value[k]) for k in ('channel_id', 'input_hash', 'channel_type', 'relevance', 'reason', 'message')}
     def normalized_proof(item):
-        return {**{k: item[k] for k in ('source_id', 'url', 'quote')}, 'date': sources[item['source_id']].get('date', '')}
+        return canonical[id(item)]
     result['evidence'] = [normalized_proof(item) for item in evidence]
     result['offers'] = [{**normalized_proof(item), 'kind': item['kind'], 'ownership': item['ownership'],
-                         'prices': item.get('prices', []), 'booking_methods': item.get('booking_methods', [])} for item in offers]
+                         'prices': offer_values[(id(item), 'prices')],
+                         'booking_methods': offer_values[(id(item), 'booking_methods')]} for item in offers]
     return result
 
 
@@ -146,7 +182,9 @@ def apply_assessment(row, settings, topic, profile):
     valid = bool(review and review.get('cache_key') == key and 0 <= time.time() - review.get('created_at', 0) <= CACHE_SECONDS)
     if valid:
         try:
-            validate_review(review, data, key)
+            checked = validate_review(review, data, key)
+            review = {**checked, **{k: review[k] for k in ('cache_key', 'created_at', 'model', 'prompt_version') if k in review}}
+            row['api_ai_review'] = review
         except (ValueError, TypeError):
             valid = False
     if not valid:
@@ -217,7 +255,8 @@ class ProxyAuditor:
         if hit and 0 <= time.time() - hit['created_at'] <= CACHE_SECONDS:
             try:
                 review = json.loads(hit['data'])
-                validate_review(review, data, key)
+                checked = validate_review(review, data, key)
+                review = {**checked, **{k: review[k] for k in ('cache_key', 'created_at', 'model', 'prompt_version') if k in review}}
                 row.update(api_ai_review=review, ai_audit_status='cached', ai_detail='')
                 return row
             except (ValueError, TypeError, KeyError):
@@ -235,6 +274,7 @@ class ProxyAuditor:
             return skipped(reason)
         timeout = min(settings.ai_timeout, max(.1, deadline - time.monotonic())) if deadline else settings.ai_timeout
         expires = time.monotonic() + timeout
+        started = time.monotonic()
         self.log(f"AI {row['username']}: запрос {self.used(run_id)}/{settings.ai_max_audits}, ожидание до {timeout:.0f} с")
         status, detail = 'error', 'Некорректный ответ AI'
         try:
@@ -277,6 +317,7 @@ class ProxyAuditor:
                 content = content.split('\n', 1)[1].rsplit('```', 1)[0].strip()
             detail = 'AI вернул невалидный JSON или ответ без проверяемых источников'
             decoded = json.loads(content)
+            self.log(f"AI {row['username']}: ответ получен за {time.monotonic() - started:.1f} с; проверяю цитаты")
             try:
                 review = validate_review(decoded, data, key)
             except ValueError as exc:
