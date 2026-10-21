@@ -9,6 +9,7 @@ from .repository import WORK_STATUSES
 from .qualification import TYPE_LABELS, CONTENT_LABELS, RULE_VERSION
 from .ai_audit import STATUS_LABELS
 from .ui_quality import quality_panel
+from .preferences import Preferences, PersistentUI
 
 
 def assessment_stale(row):
@@ -68,13 +69,14 @@ def show_evidence(row):
 
 def database_panel(runner, running):
     import pandas as pd
+    ui = PersistentUI(Preferences(runner.repo))
     rows = runner.repo.list_channels()
     if not rows:
         st.info("База пока пуста")
         return
-    status_filter = st.multiselect("Рабочие статусы", list(WORK_STATUSES), format_func=WORK_STATUSES.get)
-    search = st.text_input("Поиск в базе", key="database_search")
-    hide_non_target = st.checkbox('Скрыть нецелевые типы каналов', value=True, key='database_hide_non_target')
+    status_filter = ui.multiselect("Рабочие статусы", list(WORK_STATUSES), format_func=WORK_STATUSES.get)
+    search = ui.text_input("Поиск в базе", key="database_search")
+    hide_non_target = ui.checkbox('Скрыть нецелевые типы каналов', value=True, key='database_hide_non_target')
     visible = [r for r in rows if (not status_filter or r["work_status"] in status_filter)
                and (not hide_non_target or (r.get('channel_type') or 'unknown') in ('expert', 'unknown'))
                and (not search or search.casefold() in (r.get("title", "") + r["username"]).casefold())]

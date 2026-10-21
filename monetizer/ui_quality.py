@@ -1,27 +1,36 @@
-"""Human evaluation and operator profile controls; all writes are explicit."""
+"""Human evaluation controls and an automatically saved operator profile."""
 import json
+import sqlite3
 import streamlit as st
 
-from .profile import load_profile, save_profile
+from .profile import load_profile, save_profile, FIELDS
 from .evaluation import review_set, validate_labels, save_labels, evaluate
 from .qualification import TYPE_LABELS
 
 
 def profile_panel(repo):
     profile = load_profile(repo)
+    def save_field(field, widget_key):
+        try:
+            current = load_profile(repo)
+            current[field] = st.session_state[widget_key]
+            save_profile(repo, current)
+        except (ValueError, OSError, sqlite3.Error):
+            st.warning('Не удалось автоматически сохранить поле профиля.')
     with st.sidebar.expander('Профиль отправителя'):
-        st.caption('Используются только введённые вами факты. Профиль хранится локально в SQLite.')
-        with st.form('sender_profile_form'):
-            fields = {}
-            for key, label in [('name', 'Имя отправителя'), ('role', 'Ваша роль'), ('services', 'Какие задачи берёте'),
-                               ('verified_facts', 'Подтверждённый опыт и кейсы'), ('terms', 'Условия партнёрства, если определены')]:
-                fields[key] = st.text_area(label, profile[key], height=70) if key not in ('name', 'role') else st.text_input(label, profile[key])
-            if st.form_submit_button('Сохранить профиль отправителя'):
-                try:
-                    profile = save_profile(repo, fields)
-                    st.success('Профиль сохранён. Ручные сообщения сохраняются; для нового текста нажмите «Собрать черновик».')
-                except ValueError as exc:
-                    st.error(str(exc))
+        st.caption('Профиль сохраняется автоматически после выхода из поля. Используются только введённые вами факты.')
+        fields = {}
+        for key, label in [('name', 'Имя отправителя'), ('role', 'Ваша роль'), ('services', 'Какие задачи берёте'),
+                           ('verified_facts', 'Подтверждённый опыт и кейсы'), ('terms', 'Условия партнёрства, если определены')]:
+            widget_key = 'sender_profile_' + key
+            options = dict(key=widget_key, on_change=save_field, args=(key, widget_key), max_chars=FIELDS[key])
+            fields[key] = st.text_area(label, profile[key], height=70, **options) if key not in ('name', 'role') else st.text_input(label, profile[key], **options)
+        if st.button('Сохранить профиль отправителя'):
+            try:
+                profile = save_profile(repo, fields)
+                st.success('Профиль сохранён.')
+            except ValueError as exc:
+                st.error(str(exc))
     return profile
 
 
