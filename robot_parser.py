@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--channels", nargs="+", help="Аудит @username без TGStat")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument('--ai', action='store_true', help='AI-аудит Gemini через прокси; ключ из MONETIZER_AI_KEY, максимум 5 запросов')
+    parser.add_argument('--ai-queue', action='store_true', help='Разобрать сохранённую AI-очередь без TGStat и загрузки Telegram')
     args = parser.parse_args()
     categories = load_categories()['categories']
     if args.list_categories:
@@ -38,9 +39,9 @@ def main():
         parser.error('Неизвестная специализация для аудита')
     runner = JobRunner()
     try:
-        if args.resume:
-            settings = Settings.from_saved({**runner.state.get('settings', {}), 'ai_enabled': True}) if args.ai else None
-            runner.start(settings=settings, resume=True)
+        if args.resume or args.ai_queue:
+            settings = Settings.from_saved({**runner.state.get('settings', {}), 'ai_enabled': True}) if args.ai or args.ai_queue else None
+            runner.start(settings=settings, resume=True, ai_only=args.ai_queue)
         else:
             selected = args.categories or []
             if not selected and not args.channels:

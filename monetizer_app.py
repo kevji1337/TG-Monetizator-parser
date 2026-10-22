@@ -177,15 +177,26 @@ def results_panel():
     running = state["status"] in ("running", "stopping")
     count_found, rows = len(state["candidates"]), sorted_rows(state["rows"])
     green = sum(not r.get('assessment_stale') and r.get("status") in ("top", "recommended") for r in rows)
-    metrics = st.columns(4)
-    metrics[0].metric("Найдено", count_found)
-    metrics[1].metric("Проверено", len(rows))
+    has_ai = state.get('settings', {}).get('ai_enabled', False)
+    ai_waiting = len(state.get('ai_queue', []))
+    metrics = st.columns(5 if has_ai else 4)
+    metrics[0].metric("Новых каналов", count_found)
+    metrics[1].metric("Аудит Telegram", len(rows))
     metrics[2].metric("Подходящие / цель", f"{green} / {state.get('settings', {}).get('target_count', 30)}")
-    metrics[3].metric("Ошибки доступа", sum(r.get("status") == "error" for r in rows))
+    if has_ai:
+        metrics[3].metric('Ожидают AI', ai_waiting)
+    metrics[-1].metric("Ошибки доступа", sum(r.get("status") == "error" for r in rows))
     st.write(f"**{state['stage']}**")
     if state.get('settings', {}).get('ai_enabled'):
         st.caption(f"AI-запросы: {state.get('ai_requests_used', 0)}/{state['settings'].get('ai_max_audits', 5)}. "
                    'Кэш не расходует лимит. Зелёная метка требует проверенного ответа AI и подходящих метрик.')
+        st.caption(state.get('ai_stage', 'AI-очередь сохраняется отдельно от очереди поиска'))
+        if state.get('ai_paused') or state.get('ai_requests_used', 0) >= state['settings'].get('ai_max_audits', 5):
+            st.info('AI-запросы приостановлены. Публичный сбор продолжает наполнять очередь до цели или лимита поиска. '
+                    'Кандидаты в очереди ещё не подтверждены как подходящие эксперты.')
+        if state.get('stop_reason') == 'ai_pending':
+            st.warning(f'Сохранено кандидатов для AI: {ai_waiting}. Подтверждено: {green}. '
+                       'Это частичный результат; очередь можно разобрать отдельно без Chrome.')
     if state.get('assessment_pending'):
         st.warning(f"Устарели автоматические оценки {state['assessment_pending']} каналов. Они не засчитываются в цель, пока не выполнен пересчёт.")
         if st.button('Пересчитать сохранённые оценки', disabled=running or state.get('external_owner', False)):
@@ -216,6 +227,9 @@ def results_panel():
     if running:
         st.progress(min(green / state["settings"]["target_count"], 1.0),
                     text=f"Подходят {green}; проверено {len(rows)}; найдено {count_found}")
+        if has_ai:
+            st.progress(min((green + ai_waiting) / state['settings']['target_count'], 1.0),
+                        text=f'Сбор для AI: {ai_waiting} в очереди, {green} подтверждено. Очередь ещё не означает подходящих экспертов.')
         if state.get("external_owner"):
             st.info("Поиск выполняется в другом процессе. Его прогресс показан из базы; остановите его в окне запуска.")
         if st.button("Остановить и сохранить прогресс", disabled=state["status"] == "stopping" or state.get("external_owner", False)):
@@ -231,6 +245,14 @@ def results_panel():
                                  'dev_mode': dev_mode, 'keep_browser_on_error': keep_browser, 'browser_wait_seconds': browser_wait,
                                  'ai_enabled': ai_enabled, **ai_config}
                 runner.start(settings=Settings.from_saved(resume_config), resume=True, api_key=ai_key)
+                st.rerun()
+            except (ValueError, RuntimeError, OSError) as exc:
+                st.error(str(exc))
+    if not running and ai_waiting:
+        if st.button('Разобрать только очередь AI — без TGStat', disabled=not ai_enabled or state.get('external_owner', False)):
+            try:
+                queue_config = {**state['settings'], **ai_config, 'ai_enabled': True, 'max_minutes': time_limit}
+                runner.start(Settings.from_saved(queue_config), resume=True, api_key=ai_key, ai_only=True)
                 st.rerun()
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(str(exc))

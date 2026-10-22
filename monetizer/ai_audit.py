@@ -20,13 +20,23 @@ from .repository import dumps
 
 PROMPT_VERSION = 'expert-audit-2'
 CACHE_SECONDS = 24 * 3600
+QUEUE_VERSION = 'ai-queue-1'
 STATUS_LABELS = {
     'pending': 'Ожидает AI-аудита', 'success': 'Проверено AI', 'cached': 'AI из кэша',
     'budget': 'Лимит AI-аудитов исчерпан', 'rate_limit': 'Локальный лимит частоты AI',
     'missing_key': 'API-ключ не введён', 'error': 'Ошибка AI — требуется проверка',
     'stopped': 'AI не запущен после остановки', 'insufficient': 'Недостаточно источников для AI',
-    'metrics': 'AI пропущен: метрики не прошли', 'unavailable': 'AI недоступен до конца запуска',
+    'metrics': 'AI пропущен: метрики не прошли', 'unavailable': 'AI-запросы приостановлены; кандидат сохранён',
 }
+
+
+def needs_ai(row):
+    """A promising public audit awaiting AI, not a qualified personal expert."""
+    classification = row.get('classification', {})
+    return ((not row.get('api_ai_review') or row.get('assessment_stale')) and row.get('metric_status') in ('top', 'recommended')
+            and classification.get('channel_type', 'unknown') in ('expert', 'unknown')
+            and classification.get('relevance') != 'mismatch'
+            and len(_independent_sources(evidence_sources(row))) >= 2)
 
 
 def request_data(row, settings, topic, profile):

@@ -29,6 +29,7 @@ COLUMNS = {
     'assessment_stale': 'Автооценка устарела',
     'ai_audit_status': 'Статус AI-аудита API', 'ai_detail': 'Причина пропуска или ошибки AI',
     'api_ai_review': 'Разбор и черновик Gemini API', 'local_verdict': 'Вердикт локальных правил',
+    'ai_queued': 'Ожидает AI-разбора',
 }
 
 
