@@ -52,7 +52,7 @@ section = ui.radio('Раздел', ['Поиск', 'База кандидатов
 
 with st.sidebar:
     st.header("Новый поиск")
-    with st.expander('AI-аудит Gemini', expanded=True):
+    with st.expander('AI-аудит Gemini', expanded=False):
         ai_enabled = ui.checkbox('Анализировать посты через Gemini', value=True)
         ai_key = api_key_field(preferences)
         ai_base_url = ui.text_input('Base URL AI', value=AI_BASE_URL)
@@ -135,7 +135,7 @@ with st.sidebar:
     count = ui.number_input("Цель: подходящих каналов", 1, 1000, 30, step=1)
     new_only = ui.checkbox("Искать только новые каналы", value=True, disabled=not mode.startswith("TGStat"))
     login_pause = ui.checkbox("Дать минуту на ручной вход в TGStat", disabled=not mode.startswith("TGStat"))
-    with st.expander('Фильтры TGStat', expanded=True):
+    with st.expander('Фильтры TGStat', expanded=False):
         st.caption('Применяются при поиске на TGStat. Для готового списка каналов работают критерии аудита ниже.')
         country_labels = {c['id']: c['title'] for c in snapshot['countries']}
         language_labels = {c['id']: c['title'] for c in snapshot['languages']}
