@@ -9,24 +9,28 @@ import json
 import re
 import time
 
-import requests
-
 from .audit import normalize_username
 from .categories import assessment_profiles
 from .keywords import MICRO_NICHES, CATALOG_VERSION, get_micro_niches
 from .pitches import PLAYBOOK, PLAYBOOK_VERSION, evidence_sources
 from .qualification import CHANNEL_TYPES, RULE_VERSION, _independent_sources
 from .repository import dumps
+from .web2api import ProxyError, chat_completion, inspect_proxy
 
-PROMPT_VERSION = 'expert-audit-2'
+PROMPT_VERSION = 'expert-audit-3'
 CACHE_SECONDS = 24 * 3600
 QUEUE_VERSION = 'ai-queue-1'
+REVIEW_METADATA = ('cache_key', 'created_at', 'model', 'prompt_version', 'requested_model',
+                   'response_model', 'actual_model', 'proxy_version', 'request_id', 'usage',
+                   'elapsed_seconds', 'first_event_seconds', 'prompt_bytes', 'sources_truncated')
 STATUS_LABELS = {
     'pending': 'Ожидает AI-аудита', 'success': 'Проверено AI', 'cached': 'AI из кэша',
     'budget': 'Лимит AI-аудитов исчерпан', 'rate_limit': 'Локальный лимит частоты AI',
     'missing_key': 'API-ключ не введён', 'error': 'Ошибка AI — требуется проверка',
-    'stopped': 'AI не запущен после остановки', 'insufficient': 'Недостаточно источников для AI',
+    'stopped': 'AI-разбор остановлен', 'insufficient': 'Недостаточно источников для AI',
     'metrics': 'AI пропущен: метрики не прошли', 'unavailable': 'AI-запросы приостановлены; кандидат сохранён',
+    'input_too_large': 'Текст не помещается в лимит AI-запроса',
+    'model_unavailable': 'Модель не объявлена в web2api; кандидат сохранён',
 }
 
 
@@ -46,13 +50,28 @@ def request_data(row, settings, topic, profile):
         profiles = assessment_profiles(settings.category_ids)
     else:
         profiles = get_micro_niches(settings.niche_id) if settings.niche_id else []
-    return {
+    data = {
         'channel_id': normalize_username(row['username']), 'title': row.get('title', ''),
         'sources': evidence_sources(row), 'topic': topic,
         'focus': [{'id': p['id'], 'title': p['title'], 'terms': p['match_terms']} for p in profiles],
         'metrics': {k: row.get(k) for k in ('subs', 'avg_views', 'view_ratio', 'last_post', 'avg_gap_days')},
         'sender_profile': profile,
     }
+    # Keep all post IDs/dates and literal text prefixes. Never summarize evidence
+    # with another model or truncate the sender's claims/rules to fit a request.
+    if len(response_prompt(data, '0' * 64).encode('utf-8')) > settings.ai_prompt_bytes:
+        original = data['sources']
+        data['full_sources_hash'] = hashlib.sha256(dumps(original).encode('utf-8')).hexdigest()
+        for cap in (6000, 4000, 2500, 1600, 1000, 600):
+            data['sources'] = []
+            for source in original:
+                raw = source['text'].encode('utf-8')
+                data['sources'].append({**source, 'text': raw[:cap].decode('utf-8', errors='ignore'),
+                                        'truncated': len(raw) > cap})
+            data['sampling_note'] = 'Некоторые тексты сокращены до начала публикации; выводы только по переданным фрагментам.'
+            if len(response_prompt(data, '0' * 64).encode('utf-8')) <= settings.ai_prompt_bytes:
+                break
+    return data
 
 
 def cache_key(data, settings):
@@ -90,7 +109,10 @@ def response_prompt(data, key):
         'Не придумывай продажи, доход, авторство, цены и наличие/отсутствие команды. '
         'Дополнительные правила сообщений: ' + dumps(PLAYBOOK['global_rules']) + '\n'
         'Запрещённые утверждения: ' + dumps(PLAYBOOK['forbidden_claims']) + '\n'
-        'Схема: ' + dumps(template) + '\nДанные: ' + dumps(data)
+        'Схема: ' + dumps(template) + '\nДанные: ' + dumps(data) + '\n'
+        'Конец данных. Верни один JSON-объект без Markdown и пояснений. '
+        'В evidence/offer используй только source_id из данных и непрерывную дословную цитату. '
+        'Если доказательств недостаточно, используй unknown, а не придумывай их.'
     )
 
 
@@ -193,7 +215,7 @@ def apply_assessment(row, settings, topic, profile):
     if valid:
         try:
             checked = validate_review(review, data, key)
-            review = {**checked, **{k: review[k] for k in ('cache_key', 'created_at', 'model', 'prompt_version') if k in review}}
+            review = {**checked, **{k: review[k] for k in REVIEW_METADATA if k in review}}
             row['api_ai_review'] = review
         except (ValueError, TypeError):
             valid = False
@@ -228,6 +250,26 @@ class ProxyAuditor:
     def __init__(self, repo, settings, api_key, stop, log):
         self.repo, self.settings, self.api_key = repo, settings, api_key.strip()
         self.stop, self.log, self.disabled = stop, log, False
+        self.proxy_info = None
+
+    def _preflight(self, deadline):
+        if self.proxy_info is None:
+            seconds = min(20, max(.1, deadline - time.monotonic())) if deadline else 20
+            self.log('AI: проверяю версию web2api и список моделей (без генерации)')
+            self.proxy_info = inspect_proxy(self.settings.ai_base_url, self.api_key, self.stop, seconds)
+            info = self.proxy_info
+            if info['models_http'] in (401, 403):
+                raise ProxyError('web2api отклонил доступ при GET /models; проверьте ключ и настройки доступа; генерация не отправлялась', disable=True)
+            if info['models_checked'] and self.settings.ai_model not in info['models']:
+                raise ProxyError('Model ID отсутствует в списке web2api; проверьте модель и Cookie Pool; генерация не отправлялась',
+                                 disable=True, status='model_unavailable')
+            if not info['health_ok'] and not info['auth_checked']:
+                raise ProxyError('Не удалось получить метаданные web2api; проверьте соединение и Base URL; генерация не отправлялась', disable=True)
+            self.log('AI: web2api ' + (info['version'] or 'версия неизвестна') + '; модель объявлена в API. '
+                     'Это не подтверждает доступность аккаунта или фактическую модель ответа.')
+            if info['version'] == '4.23.0':
+                self.log('AI: в web2api 4.23.0 нет strict_model; фактическую модель смотрите в Requests. '
+                         'Изменённый upstream timeout может требовать перезапуска web2api (исправлено в 4.24.1).')
 
     def used(self, run_id):
         with self.repo.connect() as db:
@@ -266,7 +308,7 @@ class ProxyAuditor:
             try:
                 review = json.loads(hit['data'])
                 checked = validate_review(review, data, key)
-                review = {**checked, **{k: review[k] for k in ('cache_key', 'created_at', 'model', 'prompt_version') if k in review}}
+                review = {**checked, **{k: review[k] for k in REVIEW_METADATA if k in review}}
                 row.update(api_ai_review=review, ai_audit_status='cached', ai_detail='')
                 return row
             except (ValueError, TypeError, KeyError):
@@ -277,73 +319,58 @@ class ProxyAuditor:
             return skipped('missing_key')
         if self.disabled:
             return skipped('unavailable')
+        prompt = response_prompt(data, key)
+        prompt_bytes = len(prompt.encode('utf-8'))
+        if prompt_bytes > settings.ai_prompt_bytes:
+            return skipped('input_too_large', 'Правила, профиль и фрагменты не помещаются в лимит; POST не отправлялся')
+        # GET metadata does not spend the five-POST budget. Do not block cache hits.
+        try:
+            self._preflight(deadline)
+        except ProxyError as exc:
+            self.disabled = self.disabled or exc.disable
+            self.log('AI: ' + exc.detail)
+            return skipped(exc.status, exc.detail)
+        if self.stop.is_set() or (deadline is not None and time.monotonic() >= deadline):
+            return skipped('stopped')
         attempt_id, reason = self._reserve(run_id, key)
         if attempt_id is None:
             if reason == 'rate_limit':
                 self.disabled = True
             return skipped(reason)
         timeout = min(settings.ai_timeout, max(.1, deadline - time.monotonic())) if deadline else settings.ai_timeout
-        expires = time.monotonic() + timeout
-        started = time.monotonic()
-        self.log(f"AI {row['username']}: запрос {self.used(run_id)}/{settings.ai_max_audits}, ожидание до {timeout:.0f} с")
+        self.log(f"AI {row['username']}: запрос {self.used(run_id)}/{settings.ai_max_audits}, общий таймаут {timeout:.0f} с; "
+                 f"текст {prompt_bytes} байт; источников {len(data['sources'])}; streaming включён")
+        if any(s.get('truncated') for s in data['sources']):
+            self.log(f"AI {row['username']}: длинные тексты сокращены до дословных начальных фрагментов; полные тексты сохранены локально")
         status, detail = 'error', 'Некорректный ответ AI'
         try:
-            # No automatic retries or redirects: every POST consumes the run budget.
-            # Never log the response body, exception string, headers or credentials.
-            with requests.post(settings.ai_base_url.rstrip('/') + '/chat/completions',
-                               headers={'Authorization': 'Bearer ' + self.api_key, 'Content-Type': 'application/json'},
-                               json={'model': settings.ai_model, 'messages': [{'role': 'user', 'content': response_prompt(data, key)}]},
-                               timeout=(min(5, timeout), timeout), allow_redirects=False, stream=True) as response:
-                if response.status_code != 200:
-                    detail = f'Прокси вернул HTTP {response.status_code}; проверьте доступ, cookie и лимиты в его панели'
-                    self.disabled = response.status_code in (401, 403, 429) or response.status_code >= 500
-                    raise ValueError(detail)
-                chunks, size = [], 0
-                for chunk in response.iter_content(16384):
-                    size += len(chunk)
-                    if size > 1_000_000:
-                        raise ValueError('Ответ AI превышает 1 МБ')
-                    if self.stop.is_set() or time.monotonic() >= expires:
-                        detail = 'Ответ AI прерван после остановки или таймаута'
-                        raise ValueError('Ответ AI прерван после остановки или лимита времени')
-                    chunks.append(chunk)
-                try:
-                    body = json.loads(b''.join(chunks))
-                except (ValueError, UnicodeDecodeError):
-                    self.disabled = True
-                    detail = 'HTTP 200 от прокси не содержит JSON Chat Completions; проверьте доступ и cookie'
-                    raise ValueError(detail)
-            if body.get('error'):
-                detail = 'Прокси вернул ошибку модели; проверьте аккаунт и cookie в его панели'
-                self.disabled = True
-                raise ValueError(detail)
-            if body.get('choices', [{}])[0].get('finish_reason') not in ('stop', None):
-                raise ValueError('Ответ AI не завершён')
-            content = body['choices'][0]['message']['content']
-            if not isinstance(content, str):
-                raise ValueError('Нет текстового ответа AI')
-            content = content.strip()
+            reply = chat_completion(settings.ai_base_url, self.api_key, settings.ai_model, prompt,
+                                    self.stop, timeout, lambda message: self.log(f"AI {row['username']}: {message}"))
+            self.log(f"AI {row['username']}: ответ получен за {reply.elapsed_seconds:.1f} с; "
+                     f"ID ответа: {reply.request_id or 'не указан'}; проверяю JSON и цитаты")
+            content = reply.content.strip()
             if content.startswith('```') and content.endswith('```'):
                 content = content.split('\n', 1)[1].rsplit('```', 1)[0].strip()
             detail = 'AI вернул невалидный JSON или ответ без проверяемых источников'
             decoded = json.loads(content)
-            self.log(f"AI {row['username']}: ответ получен за {time.monotonic() - started:.1f} с; проверяю цитаты")
             try:
                 review = validate_review(decoded, data, key)
             except ValueError as exc:
                 detail = str(exc)  # Only constant messages from our validator, never model text.
                 raise
-            review.update(cache_key=key, created_at=time.time(), model=settings.ai_model, prompt_version=PROMPT_VERSION)
+            review.update(cache_key=key, created_at=time.time(), model=settings.ai_model, prompt_version=PROMPT_VERSION,
+                          requested_model=settings.ai_model, response_model=reply.response_model, actual_model=None,
+                          proxy_version=(self.proxy_info or {}).get('version', ''), request_id=reply.request_id,
+                          usage=reply.usage or {}, elapsed_seconds=reply.elapsed_seconds,
+                          first_event_seconds=reply.first_event_seconds, prompt_bytes=prompt_bytes,
+                          sources_truncated=any(s.get('truncated') for s in data['sources']))
             with self.repo.connect() as db:
                 db.execute('INSERT OR REPLACE INTO api_ai_cache VALUES(?,?,?)', (key, review['created_at'], dumps(review)))
             row.update(api_ai_review=review)
             status, detail = 'success', ''
-        except requests.Timeout:
-            self.disabled = True
-            detail = 'Истёк таймаут AI; повтор автоматически не отправлялся'
-        except requests.RequestException:
-            self.disabled = True
-            detail = 'Ошибка соединения с AI-прокси; повтор автоматически не отправлялся'
+        except ProxyError as exc:
+            self.disabled = self.disabled or exc.disable
+            status, detail = exc.status, exc.detail
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             # Validation errors deliberately do not include untrusted response text.
             pass

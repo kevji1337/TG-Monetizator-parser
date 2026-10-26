@@ -620,7 +620,7 @@ class JobRunner:
         runtime_key = (api_key or os.environ.get('MONETIZER_AI_KEY', '')).strip()
         if not runtime_key:
             raise ValueError('Введите API-ключ в разделе «AI-аудит Gemini»')
-        allowed = {k: ai_config[k] for k in ('ai_base_url', 'ai_model', 'ai_max_audits', 'ai_timeout')}
+        allowed = {k: ai_config[k] for k in ('ai_base_url', 'ai_model', 'ai_max_audits', 'ai_timeout', 'ai_prompt_bytes') if k in ai_config}
         with RunGuard(self.repo.path):
             settings = replace(Settings.from_saved(self.state['settings']), ai_enabled=True, **allowed)
             row = next((r for r in self.snapshot()['rows'] if r['username'] == username), None)

@@ -104,6 +104,7 @@ def last_run_preferences(state):
         'ai_base_url': ('text_input', 'Base URL AI'), 'ai_model': ('text_input', 'Model ID'),
         'ai_max_audits': ('number_input', 'Максимум запросов AI за запуск'),
         'ai_timeout': ('number_input', 'Таймаут AI, секунд'),
+        'ai_prompt_bytes': ('number_input', 'Лимит текста AI-запроса, байт UTF-8'),
         'dev_mode': ('checkbox', 'Dev-режим'), 'keep_browser_on_error': ('checkbox', 'Оставлять Chrome открытым при ошибке'),
         'browser_wait_seconds': ('number_input', 'Ожидание ручного входа, секунд'),
         'country_ids': ('multiselect', 'Страна канала'), 'language_ids': ('multiselect', 'Язык канала'),

@@ -56,7 +56,8 @@ class Settings:
     ai_base_url: str = AI_BASE_URL
     ai_model: str = AI_MODEL
     ai_max_audits: int = 5
-    ai_timeout: int = 120
+    ai_timeout: int = 600
+    ai_prompt_bytes: int = 96000
 
     def __post_init__(self):
         endpoint = urlsplit(self.ai_base_url)
@@ -66,8 +67,10 @@ class Settings:
         if type(self.ai_enabled) is not bool or type(self.ai_max_audits) is not int or not 1 <= self.ai_max_audits <= 5:
             raise ValueError('AI: включение — флаг; лимит — от 1 до 5 запросов за запуск')
         if (not isinstance(self.ai_model, str) or not self.ai_model.strip() or len(self.ai_model) > 160
-                or type(self.ai_timeout) is not int or not 10 <= self.ai_timeout <= 180):
-            raise ValueError('AI: укажите Model ID и таймаут 10–180 секунд')
+                or type(self.ai_timeout) is not int or not 10 <= self.ai_timeout <= 900):
+            raise ValueError('AI: укажите Model ID и общий таймаут 10–900 секунд')
+        if type(self.ai_prompt_bytes) is not int or not 16000 <= self.ai_prompt_bytes <= 120000:
+            raise ValueError('Размер текста AI-запроса: 16000–120000 байт UTF-8')
         if self.search_mode not in ('categories', 'keywords', 'manual'):
             raise ValueError('Неизвестный способ поиска')
         if type(self.browser_wait_seconds) is not int or not 0 <= self.browser_wait_seconds <= 1800:

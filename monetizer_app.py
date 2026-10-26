@@ -18,6 +18,7 @@ from monetizer.pitches import direct_scenario
 from monetizer.runner import JobRunner, sorted_rows
 from monetizer.settings import Settings, AI_BASE_URL, AI_MODEL
 from monetizer.ai_audit import STATUS_LABELS
+from monetizer.web2api import inspect_proxy, ProxyError
 from monetizer.ui_workspace import render_workspace, show_evidence
 from monetizer.qualification import TYPE_LABELS
 from monetizer.ui_quality import profile_panel
@@ -57,11 +58,42 @@ with st.sidebar:
         ai_base_url = ui.text_input('Base URL AI', value=AI_BASE_URL)
         ai_model = ui.text_input('Model ID', value=AI_MODEL)
         ai_max_audits = ui.number_input('Максимум запросов AI за запуск', 1, 5, 5)
-        ai_timeout = ui.number_input('Таймаут AI, секунд', 10, 180, 120, step=10)
+        ai_timeout = ui.number_input('Таймаут AI, секунд', 10, 900, 600, step=10,
+                                     help='Общий срок ожидания, включая запуск ответа и reasoning. Подключение ограничено отдельно: 5 секунд.')
+        ai_prompt_bytes = ui.number_input('Лимит текста AI-запроса, байт UTF-8', 16000, 120000, 96000, step=4000)
         st.caption('Через ваш gemini-web2api-go. Отправляются публичные посты, описание и профиль отправителя. '
                    'Один запрос за раз; ошибки тоже расходуют лимит. Кэш действует 24 часа.')
-        st.caption('После остановки текущий запрос может ожидать ответа до таймаута. При недоступности модели канал остаётся на проверке.')
-    ai_config = dict(ai_base_url=ai_base_url, ai_model=ai_model, ai_max_audits=ai_max_audits, ai_timeout=ai_timeout)
+        st.caption('Streaming показывает ожидание, получение reasoning и итогового ответа. Текст reasoning не сохраняется. '
+                   'Остановка закрывает соединение; удалённая генерация может продолжиться на прокси.')
+        if ai_timeout <= 180:
+            st.warning('Сохранён короткий таймаут AI. Для Argon Thinking с upstream timeout 180 с и тремя попытками '
+                       'web2api увеличьте его до 600 с. Прежнее значение не меняется автоматически.')
+        connection_key = (ai_key or os.environ.get('MONETIZER_AI_KEY', '')).strip()
+        connection_signature = hashlib.sha256((ai_base_url + '\0' + connection_key).encode()).hexdigest()
+        if st.button('Проверить web2api — без генерации', disabled=runner.snapshot()['status'] in ('running', 'stopping')):
+            try:
+                with st.spinner('Проверяю версию и список моделей, без AI-аудита…'):
+                    connection_info = inspect_proxy(ai_base_url, connection_key)
+                st.session_state['_web2api_connection'] = (connection_signature, connection_info)
+            except (ProxyError, ValueError) as exc:
+                st.error(str(exc))
+        connection = st.session_state.get('_web2api_connection')
+        if connection and connection[0] == connection_signature:
+            info = connection[1]
+            st.caption('web2api: ' + (info['version'] or 'версия неизвестна') +
+                       (' · API-ключ принят' if info['auth_checked'] else ' · ключ не подтверждён'))
+            if info['models_checked'] and ai_model in info['models']:
+                st.success('Model ID есть в списке API. Реальная генерация не проверялась.')
+            elif info['models_checked']:
+                st.error('Model ID отсутствует в списке API. Проверьте имя и Cookie Pool в web2api.')
+            for note in info['notes']:
+                st.warning(note)
+            if info['version'] == '4.23.0':
+                st.warning('В web2api 4.23.0 нет strict_model, а смена upstream timeout может требовать перезапуска прокси. '
+                           'Исправление таймаута появилось в 4.24.1. Фактическая модель видна в Requests web2api.')
+            st.caption('Список моделей не подтверждает действительность cookie или оставшуюся квоту аккаунта.')
+    ai_config = dict(ai_base_url=ai_base_url, ai_model=ai_model, ai_max_audits=ai_max_audits,
+                     ai_timeout=ai_timeout, ai_prompt_bytes=ai_prompt_bytes)
     st.caption('Настройки сохраняются автоматически. Текстовые поля — после Enter или выхода из поля.')
     with st.expander('Режим разработки'):
         dev_mode = ui.checkbox('Dev-режим', value=os.environ.get('MONETIZER_DEV') == '1')

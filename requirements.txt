@@ -1,6 +1,7 @@
 # Public preview mode and local UI; does not require Telegram credentials.
 streamlit>=1.50,<2
 requests>=2.31,<3
+httpx>=0.28,<0.29
 beautifulsoup4>=4.12,<5
 openpyxl>=3.1,<4
 selenium>=4.20,<5

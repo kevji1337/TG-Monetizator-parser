@@ -26,7 +26,16 @@ def show_evidence(row):
     if api_review:
         with st.expander('Анализ Gemini через API', expanded=True):
             st.text(api_review['reason'])
-            st.caption('Модель: ' + api_review.get('model', '') + ' · исходный вердикт правил: ' + row.get('local_verdict', ''))
+            st.caption('Запрошенная модель: ' + api_review.get('requested_model', api_review.get('model', '')) +
+                       ' · исходный вердикт правил: ' + row.get('local_verdict', ''))
+            st.caption('Фактическая модель: ' + (api_review.get('actual_model') or 'не сообщается Chat Completions; смотрите Requests в web2api'))
+            if api_review.get('proxy_version'):
+                st.caption(f"web2api {api_review['proxy_version']} · ответ за {api_review.get('elapsed_seconds', '?')} с · "
+                           f"текст запроса: {api_review.get('prompt_bytes', '?')} байт UTF-8")
+            if api_review.get('sources_truncated'):
+                st.caption('В AI переданы сокращённые начала длинных публикаций; полные загруженные тексты сохранены в базе.')
+            if api_review.get('usage'):
+                st.caption('Оценка токенов web2api: ' + json.dumps(api_review['usage'], ensure_ascii=False))
             for proof in api_review['evidence']:
                 st.text(proof['quote'])
                 st.caption(proof.get('date', '') + ' · ' + proof['url'])
