@@ -108,6 +108,7 @@ def last_run_preferences(state):
         'dev_mode': ('checkbox', 'Dev-режим'), 'keep_browser_on_error': ('checkbox', 'Оставлять Chrome открытым при ошибке'),
         'browser_wait_seconds': ('number_input', 'Ожидание ручного входа, секунд'),
         'tgstat_profile_id': ('selectbox', 'Профиль TGStat'),
+        'tgstat_auto_switch': ('checkbox', 'Автоматически пропускать ограниченные профили'),
         'country_ids': ('multiselect', 'Страна канала'), 'language_ids': ('multiselect', 'Язык канала'),
         'channel_type': ('selectbox', 'Тип канала'), 'micro_id': ('selectbox', 'Проверять конкретную специализацию'),
         'target_count': ('number_input', 'Цель: подходящих каналов'), 'new_only': ('checkbox', 'Искать только новые каналы'),

@@ -54,6 +54,7 @@ class Settings:
     keep_browser_on_error: bool = True
     browser_wait_seconds: int = 300
     tgstat_profile_id: str = 'default'
+    tgstat_auto_switch: bool = False
     ai_enabled: bool = False
     ai_base_url: str = AI_BASE_URL
     ai_model: str = AI_MODEL
@@ -63,6 +64,8 @@ class Settings:
 
     def __post_init__(self):
         validate_profile_id(self.tgstat_profile_id)
+        if type(self.tgstat_auto_switch) is not bool:
+            raise ValueError('Автопереключение профилей TGStat должно быть флагом')
         endpoint = urlsplit(self.ai_base_url)
         if (endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username or endpoint.password
                 or endpoint.query or endpoint.fragment):

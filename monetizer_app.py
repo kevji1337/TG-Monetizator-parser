@@ -104,7 +104,7 @@ with st.sidebar:
         keep_browser = ui.checkbox('Оставлять Chrome открытым при ошибке', value=True)
         browser_wait = ui.number_input('Ожидание ручного входа, секунд', 0, 1800, 300, step=30)
     mode = ui.radio("Источник", ["TGStat — каталог тематик", "Список каналов — только аудит"])
-    tgstat_profile_id = profile_picker(runner, ui) if mode.startswith('TGStat') else 'default'
+    tgstat_profile_id, tgstat_auto_switch = profile_picker(runner, ui) if mode.startswith('TGStat') else ('default', False)
     snapshot = load_categories()
     labels = {c['id']: c['title'] for c in snapshot['categories']}
     previous = st.session_state.get('tgstat_category_ids')
@@ -194,6 +194,7 @@ with st.sidebar:
                                 exclude_dead=exclude_dead, exclude_scam=exclude_scam, exclude_red_label=exclude_red,
                                 dev_mode=dev_mode, keep_browser_on_error=keep_browser, browser_wait_seconds=browser_wait,
                                 tgstat_profile_id=tgstat_profile_id,
+                                tgstat_auto_switch=tgstat_auto_switch,
                                 ai_enabled=ai_enabled, **ai_config)
             usernames = re.split(r"[\s,;]+", channels_text.strip()) if channels_text.strip() else []
             if not mode.startswith("TGStat") and not usernames:
@@ -267,7 +268,19 @@ def results_panel():
     if state.get("niche"):
         st.caption(f"Текущий отчёт: {state['niche']}")
         if not state.get('manual') and not state.get('ai_only'):
-            st.caption('Профиль TGStat этого запуска: ' + TGStatProfiles(runner.repo).name(state.get('settings', {}).get('tgstat_profile_id', 'default')))
+            plan = state.get('tgstat_profiles', {})
+            active_profile = plan.get('active', state.get('settings', {}).get('tgstat_profile_id', 'default'))
+            st.caption('Текущий профиль TGStat: ' + TGStatProfiles(runner.repo).name(active_profile))
+            if plan.get('skipped'):
+                with st.expander('Пропущенные профили TGStat', expanded=False):
+                    for profile_id, detail in plan['skipped'].items():
+                        st.write(plan.get('names', {}).get(profile_id, profile_id) + ': ' + detail['reason'])
+                    if not running and st.button('Повторить пропущенные профили TGStat', disabled=state.get('external_owner', False)):
+                        try:
+                            runner.retry_tgstat_profiles()
+                            st.rerun()
+                        except (ValueError, RuntimeError, OSError) as exc:
+                            st.error(str(exc))
     if running:
         st.progress(min(green / state["settings"]["target_count"], 1.0),
                     text=f"Подходят {green}; проверено {len(rows)}; найдено {count_found}")
@@ -287,7 +300,8 @@ def results_panel():
                 resume_config = {**state["settings"], "max_audits": audit_budget, "max_minutes": time_limit,
                                  "login_wait_seconds": 60 if login_pause else 0,
                                  'dev_mode': dev_mode, 'keep_browser_on_error': keep_browser, 'browser_wait_seconds': browser_wait,
-                                 'tgstat_profile_id': tgstat_profile_id,
+                                 'tgstat_profile_id': state['settings'].get('tgstat_profile_id', 'default'),
+                                 'tgstat_auto_switch': tgstat_auto_switch,
                                  'ai_enabled': ai_enabled, **ai_config}
                 runner.start(settings=Settings.from_saved(resume_config), resume=True, api_key=ai_key)
                 st.rerun()

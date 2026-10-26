@@ -33,6 +33,7 @@ class TGStatSearch:
         self._unavailable_urls = set()
         self.session_id, self.stage = uuid4().hex[:12], 'created'
         self.preserve_on_close = False
+        self.last_restriction = ''
         self.control = control or BrowserControl()
 
     def location(self):
@@ -136,13 +137,17 @@ class TGStatSearch:
         self._wait(lambda d: d.execute_script("return window.__monetizerRequest !== null"))
         response = self.driver.execute_script("return window.__monetizerRequest")
         logger().info('session=%s AJAX http=%s status=%s', self.session_id, response.get('http'), response.get('status'))
-        if response["http"] != 200:
-            raise RuntimeError(f"TGStat HTTP {response['http']}")
-        if response.get("status") == "restricted":
+        restricted = (response['http'] == 200 and response.get('status') == 'restricted') or response['http'] == 401
+        if restricted:
+            self.last_restriction = 'HTTP 401: требуется вход' if response['http'] == 401 else 'TGStat: restricted (требуется вход или достигнут лимит доступа)'
             self.preserve_on_close = True
+            if self.settings.tgstat_auto_switch:
+                return False
             if self._wait_for_login():
                 raise RetryAfterLogin()
             return False
+        if response["http"] != 200:
+            raise RuntimeError(f"TGStat HTTP {response['http']}")
         if response.get("status") not in (None, "ok", "success"):
             raise RuntimeError(f"TGStat: {response['status']}")
         return True

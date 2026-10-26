@@ -19,6 +19,7 @@ from .qualification import qualify, RULE_VERSION, TYPE_LABELS
 from .repository import Repository, dumps, content_hash
 from .profile import load_profile, profile_version
 from .search import TGStatSearch, SearchBudgetExceeded
+from .profile_search import ProfileSearch, profile_plan
 from .settings import Settings
 from .categories import category_key, category_label, category_id_from_key, CATEGORY_RULES_VERSION
 from .tgstat_filters import filter_spec
@@ -117,7 +118,8 @@ class JobRunner:
                           time.perf_counter() - started, len(self.state['rows']), self.state.get('assessment_pending', 0))
 
     def _signature(self, row, settings, profile):
-        assessment_settings = {key: value for key, value in settings.to_dict().items() if key != 'tgstat_profile_id'}
+        assessment_settings = {key: value for key, value in settings.to_dict().items()
+                               if key not in ('tgstat_profile_id', 'tgstat_auto_switch')}
         return hashlib.sha256(dumps([content_hash(row), assessment_settings, self.state.get('niche', ''),
                                      RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, PROMPT_VERSION, QUEUE_VERSION, PRIORITY_VERSION, profile_version(profile),
                                      datetime.now(timezone.utc).date().isoformat()]).encode()).hexdigest()
@@ -181,6 +183,33 @@ class JobRunner:
 
     def resume_browser(self):
         self.browser_control.resume.set()
+
+    def _profile_search_state(self, plan):
+        with self.lock:
+            previous = self.state.get('tgstat_profiles', {}).get('active')
+            self.state['tgstat_profiles'] = plan
+            if previous != plan['active']:
+                for cursor in self.state.get('query_state', {}).values():
+                    cursor.update(page=0, exhausted=False, blocked=False)
+            if plan['exhausted']:
+                for cursor in self.state.get('query_state', {}).values():
+                    cursor.update(exhausted=True, blocked=True)
+        self._persist()
+
+    def retry_tgstat_profiles(self):
+        if self.state['status'] in ('running', 'stopping'):
+            raise RuntimeError('Сначала остановите поиск')
+        with RunGuard(self.repo.path):
+            with self.lock:
+                plan = self.state.get('tgstat_profiles')
+                if not plan:
+                    raise ValueError('В этом запуске нет очереди профилей TGStat')
+                plan.update(active=plan['order'][0], skipped={}, exhausted=False)
+                for cursor in self.state.get('query_state', {}).values():
+                    cursor.update(page=0, exhausted=False, blocked=False)
+                self.state['search_complete'] = False
+            self.log('Метки пропуска профилей TGStat сброшены вручную. Поиск начнётся только после нажатия «Продолжить сохранённый запуск».')
+            self._persist()
 
     def snapshot(self):
         if self._external_owner:
@@ -276,12 +305,15 @@ class JobRunner:
             uses_tgstat = not ai_only and not (self.state.get('manual') if resume else bool(usernames))
             if uses_tgstat and retained_sessions(include_url=False):
                 raise RuntimeError('Перед поиском закройте Chrome кнопкой в «Управление профилями TGStat» или в Dev-диагностике.')
+            plan = (copy.deepcopy(self.state.get('tgstat_profiles')) if resume else None) if uses_tgstat else None
+            if uses_tgstat and plan is None:
+                plan = profile_plan(self.repo, settings)
             guard = RunGuard(self.repo.path)
             guard.__enter__()
             if not resume:
                 scope_data = {k: v for k, v in settings.to_dict().items() if k not in (
                     "target_count", "max_audits", "max_minutes", "new_only", "workers", "requests_per_second", "login_wait_seconds", "retries", "connect_timeout", "read_timeout",
-                    'dev_mode', 'keep_browser_on_error', 'browser_wait_seconds', 'tgstat_profile_id')}
+                    'dev_mode', 'keep_browser_on_error', 'browser_wait_seconds', 'tgstat_profile_id', 'tgstat_auto_switch')}
                 self.state = {"run_id": uuid4().hex, "settings": settings.to_dict(), "queries": queries,
                               "query_scope": hashlib.sha256(dumps([niche, scope_data, RULE_VERSION, CATALOG_VERSION, CATEGORY_RULES_VERSION]).encode()).hexdigest(),
                               "niche": niche.strip(), "manual": bool(usernames), "rows": [], "logs": [], "paths": [],
@@ -295,6 +327,8 @@ class JobRunner:
                                   logs=[], paths=[], queries=[], query_stats={}, query_state={}, search_complete=True,
                                   ai_paused=False, ai_stage='Новый AI-разбор сохранённых постов')
             self.state["settings"] = settings.to_dict()
+            if uses_tgstat:
+                self.state['tgstat_profiles'] = plan
             self.state['ai_only'] = bool(ai_only)
             self._mark_pending(settings)
             self._api_auditor = ProxyAuditor(self.repo, settings, runtime_key, self.stop_event, self.log) if settings.ai_enabled else None
@@ -304,7 +338,8 @@ class JobRunner:
             for query in self.state.get("queries", []):
                 self.state.setdefault("query_state", {}).setdefault(query, {"page": 0, "buffer": [], "exhausted": False, "blocked": False, "served": 0})
                 self.state.setdefault("query_stats", {}).setdefault(query, {"found": 0, "duplicates": 0, "seconds": 0, "access_errors": 0})
-                if resume and self.state["query_state"][query]["blocked"]:
+                if (resume and self.state["query_state"][query]["blocked"]
+                        and not (settings.tgstat_auto_switch and plan and plan['exhausted'])):
                     self.state["query_state"][query].update(blocked=False, exhausted=False)
             self.stop_event.clear()
             self.browser_control = BrowserControl(self._browser_state)
@@ -350,7 +385,7 @@ class JobRunner:
                 names = list(dict.fromkeys(normalize_username(u) for u in response["usernames"]))
                 cursor["buffer"] = names
                 if not response.get("restricted"):
-                    cursor["page"] += 1
+                    cursor["page"] = response.get('page_number', cursor['page']) + 1
                 cursor["exhausted"] = response["exhausted"]
                 cursor["blocked"] = response.get("restricted", False)
                 stats["found"] += len(names)
@@ -470,8 +505,9 @@ class JobRunner:
                 self._sync_ai_queue(settings)
                 self.state.update(ai_paused=False, ai_stage='AI готов',
                                   stage='AI-разбор сохранённой очереди' if ai_only else 'Поиск и публичный аудит Telegram')
-            if not ai_only:
-                search = TGStatSearch(settings, self.stop_event, self.log, deadline, self.browser_control)
+            if not ai_only and not self.state.get('manual'):
+                search = ProfileSearch(settings, self.state['tgstat_profiles'], self.stop_event, self.log,
+                                       deadline, self.browser_control, self._profile_search_state, search_factory=TGStatSearch)
             excluded = self.repo.processed() if settings.new_only and not self.state.get("manual") else set()
             history = self.repo.query_history(self.state.get("query_scope", ""), self.state.get("run_id"))
             while True:
