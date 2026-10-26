@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import time
+from collections import Counter
 
 import streamlit as st
 
@@ -25,6 +26,7 @@ from monetizer.ui_quality import profile_panel
 from monetizer.profile import profile_version
 from monetizer.diagnostics import logger
 from monetizer.preferences import Preferences, PersistentUI, api_key_field, last_run_preferences
+from monetizer.candidate_insights import selection_summary, selection_bucket, ai_priority, priority_key, BUCKETS
 
 PAGE_STARTED = time.perf_counter()
 
@@ -47,7 +49,7 @@ ui = PersistentUI(preferences)
 sender_profile = profile_panel(runner.repo)
 st.title("Монетизатор трафика")
 st.caption("Поиск публичных Telegram-каналов экспертов · аудит просмотров · черновики предложений")
-section = ui.radio('Раздел', ['Поиск', 'База кандидатов', 'История запусков', 'Пакет ChatGPT', 'Качество отбора', 'Dev-диагностика'],
+section = ui.radio('Раздел', ['Поиск', 'База кандидатов', 'План контактов', 'История запусков', 'Пакет ChatGPT', 'Качество отбора', 'Dev-диагностика'],
                    horizontal=True)
 
 with st.sidebar:
@@ -254,6 +256,10 @@ def results_panel():
         st.warning(state['browser']['message'])
         if st.button('Продолжить после входа', key='search_resume'):
             runner.resume_browser()
+    elif any(cursor.get('blocked') for cursor in state.get('query_state', {}).values()):
+        st.warning('TGStat ограничил новые страницы одной или нескольких тематик. ' +
+                   ('Робот может продолжать аудит уже найденных каналов и поиск по другим доступным тематикам.' if running else
+                    'Сохранённые каналы доступны для отдельного AI-разбора. Для возобновления поиска может потребоваться вход в Chrome.'))
     if state.get("niche"):
         st.caption(f"Текущий отчёт: {state['niche']}")
     if running:
@@ -314,6 +320,27 @@ def results_panel():
         st.info("Результаты появятся по мере аудита. Можно также проверить свой список публичных каналов.")
         return
     import pandas as pd
+    with st.expander('Сводка отбора и причины'):
+        st.caption(f'Проверено Telegram-каналов: {len(rows)}. Каждый канал учитывается ровно в одной главной причине; '
+                   'непроверенные находки TGStat сюда не входят. «Проверено AI» означает корректный ответ, а не прохождение отбора.')
+        st.dataframe(pd.DataFrame(selection_summary(rows)), hide_index=True, width='stretch')
+        types = Counter(TYPE_LABELS.get(row.get('channel_type'), 'Не установлено') for row in rows)
+        st.caption('Типы всех проверенных каналов, включая те, которые также не прошли метрики:')
+        st.dataframe(pd.DataFrame([{'Тип канала': kind, 'Каналов': value} for kind, value in types.most_common()]),
+                     hide_index=True, width='stretch')
+    if has_ai:
+        with st.expander('Очередь AI по приоритету'):
+            waiting_rows = sorted([row for row in rows if row.get('ai_queued')], key=priority_key)
+            st.caption('Сначала личная практика и соответствие теме. Балл управляет порядком проверки, не зелёной меткой. '
+                       'Первые кандидаты выбираются после небольшой начальной выборки: до 12 публичных аудитов или 8 кандидатов.')
+            st.dataframe(pd.DataFrame([{'Канал': row['username'], 'Название': row.get('title'),
+                                        'Приоритет': ai_priority(row)['ai_priority_score'],
+                                        'Почему': ai_priority(row)['ai_priority_reason']} for row in waiting_rows[:15]],
+                                      columns=['Канал', 'Название', 'Приоритет', 'Почему']), hide_index=True, width='stretch')
+    reason_filter = ui.multiselect('Отбор по главной причине', list(BUCKETS), format_func=BUCKETS.get,
+                                   placeholder='Все причины')
+    if 'non_target' in reason_filter:
+        st.caption('Для просмотра нецелевых типов снимите ниже флажок «Скрыть новости, агрегаторы, школы…».')
     st.caption("Зелёная метка: метрики + признаки личной практики минимум в двух источниках + соответствие теме. Это предварительный отбор. Суточный охват проверяется фильтром TGStat; здесь показываются просмотры постов. Низкое отношение просмотров к подписчикам не доказывает накрутку.")
     filter_columns = st.columns([1, 1, 2])
     only_green = ui.on(filter_columns[0]).checkbox("Только зелёные")
@@ -323,6 +350,7 @@ def results_panel():
     selected = [r for r in rows if (not only_green or (not r.get('assessment_stale') and r.get("status") in ("top", "recommended")))
                 and (not hide_non_target or (r.get('channel_type') or 'unknown') in ('expert', 'unknown'))
                 and (not only_contact or r.get("author_contact"))
+                and (not reason_filter or selection_bucket(r) in reason_filter)
                 and (not search or search.casefold() in f"{r.get('title', '')} {r['username']}".casefold())]
     st.caption(f"Показано {len(selected)} из {len(rows)}. Скачивание учитывает фильтры.")
     st.caption('Неопределённые каналы остаются с жёлтой меткой; они не входят в цель поиска. Снимите фильтр, чтобы увидеть отклонённые типы и основания.')
@@ -330,6 +358,8 @@ def results_panel():
                "last_post", "youtube", "instagram", "author_contact", "reasons", "link"]
     if state.get('settings', {}).get('ai_enabled'):
         visible.insert(2, 'ai_audit_status')
+        visible.insert(3, 'ai_priority_score')
+    visible += ['next_contact_date', 'next_action_label']
     frame = pd.DataFrame([{COLUMNS[k]: '⏳ Оценка устарела' if k == 'verdict' and r.get('assessment_stale') else
                            STATUS_LABELS.get(r.get(k), '') if k == 'ai_audit_status' else
                            TYPE_LABELS.get(r.get(k), 'Не установлено') if k == 'channel_type' else r.get(k)
@@ -343,7 +373,7 @@ def results_panel():
         c1.download_button("Скачать Excel", xlsx_data, filename + ".xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         c2.download_button("Скачать CSV", csv_data, filename + ".csv", mime="text/csv")
-        st.subheader("Сообщение автору")
+        st.subheader("Карточка канала и сообщение")
         chosen = st.selectbox("Канал для черновика", [r["username"] for r in selected])
         row = next(r for r in selected if r["username"] == chosen)
         if st.button('AI-аудит этого канала по сохранённым постам', disabled=running or not ai_enabled):
@@ -355,7 +385,7 @@ def results_panel():
                 st.rerun()
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(str(exc))
-        show_evidence(row, runner.repo)
+        show_evidence(row, runner.repo, running)
         if row.get('api_ai_review', {}).get('message'):
             if st.button('Принять черновик Gemini как сохранённое сообщение', disabled=running):
                 review = row['api_ai_review']

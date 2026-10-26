@@ -139,7 +139,8 @@ class TGStatSearch:
                 self._check()
                 if self.control.resume.wait(.25):
                     return True
-            self.log('Время ожидания входа истекло. Прогресс сохранён; окно Chrome остаётся для диагностики.')
+            self.log('Время ожидания входа истекло. Получение новых страниц этой тематики остановлено; '
+                     'аудит уже найденных каналов может продолжаться. Chrome будет сохранён, если включена диагностика.')
             return False
         finally:
             self.control.update(session_id=self.session_id, stage=self.stage, waiting=False, message='Ожидание входа завершено')

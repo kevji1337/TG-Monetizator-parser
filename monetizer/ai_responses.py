@@ -12,7 +12,7 @@ def save_response(repo, attempt_id, run_id, username, key, data, content, metada
     with repo.connect() as db:
         db.execute(SCHEMA)
         db.execute('INSERT INTO api_ai_responses(attempt_id,run_id,username,cache_key,created_at,context,content,metadata) '
-                   'VALUES(?,?,?,?,?,?,?,?,?)',
+                   'VALUES(?,?,?,?,?,?,?,?)',
                    (attempt_id, run_id, username.lstrip('@').lower(), key, time.time(),
                     json.dumps(data, ensure_ascii=False), content, json.dumps(metadata, ensure_ascii=False)))
 

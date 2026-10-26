@@ -15,7 +15,7 @@ from .audit import Cancelled, WebAuditor, error_row, normalize_username, reasses
 from .export import RESULTS_DIR, atomic_json, save_reports
 from .keywords import unique_queries, CATALOG_VERSION
 from .pitches import compose_pitch, PLAYBOOK_VERSION
-from .qualification import qualify, RULE_VERSION
+from .qualification import qualify, RULE_VERSION, TYPE_LABELS
 from .repository import Repository, dumps, content_hash
 from .profile import load_profile, profile_version
 from .search import TGStatSearch, SearchBudgetExceeded
@@ -24,6 +24,7 @@ from .categories import category_key, category_label, category_id_from_key, CATE
 from .tgstat_filters import filter_spec
 from .diagnostics import BrowserControl, logger
 from .ai_audit import ProxyAuditor, apply_assessment, PROMPT_VERSION, QUEUE_VERSION, needs_ai, cache_key, request_data
+from .candidate_insights import ai_priority, priority_key, PRIORITY_VERSION
 
 RANK = {"top": 0, "recommended": 1, "review": 2, "rejected": 3, "error": 4}
 STOP_LABELS = {"target_reached": "Цель достигнута", "exhausted": "Доступная выдача исчерпана",
@@ -117,7 +118,7 @@ class JobRunner:
 
     def _signature(self, row, settings, profile):
         return hashlib.sha256(dumps([content_hash(row), settings.to_dict(), self.state.get('niche', ''),
-                                     RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, PROMPT_VERSION, QUEUE_VERSION, profile_version(profile),
+                                     RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, PROMPT_VERSION, QUEUE_VERSION, PRIORITY_VERSION, profile_version(profile),
                                      datetime.now(timezone.utc).date().isoformat()]).encode()).hexdigest()
 
     def _mark_pending(self, settings):
@@ -141,6 +142,7 @@ class JobRunner:
         row = apply_assessment(row, settings, self.state.get('niche', ''), profile)
         row['_evaluation_signature'] = signature
         row['assessment_stale'] = False
+        row.update(ai_priority(row))
         return row
 
     def _refresh_rows(self, settings, progress=None, cancellable=False):
@@ -373,7 +375,11 @@ class JobRunner:
                     self.state["candidates"][username] = [query]
                     self.state["queue"].append(username)
             self.state["query_state"][query], self.state["query_stats"][query] = cursor, stats
-        self.log(f"{category_label(query)}: найдено {stats['found']}, повторов {stats['duplicates']}")
+        if cursor['blocked']:
+            self.log(f"{category_label(query)}: TGStat ограничил новые страницы; ранее найдено {stats['found']}. "
+                     'Разбираю сохранённую очередь; другие доступные тематики могут продолжать поиск.')
+        else:
+            self.log(f"{category_label(query)}: найдено {stats['found']}, повторов {stats['duplicates']}")
         self._persist()
 
     def _consume(self, future, username, settings):
@@ -417,6 +423,9 @@ class JobRunner:
         if 'ai_request_key' not in result:
             current['ai_request_key'] = cache_key(request_data(current, settings, self.state.get('niche', ''), profile), settings)
         current = self._evaluate(current, settings, profile)
+        if current.get('api_ai_review') and current.get('ai_audit_status') in ('success', 'cached'):
+            self.log(f"{username}: {current['verdict']}; тип по AI: " +
+                     TYPE_LABELS.get(current.get('channel_type'), 'Не установлен'))
         with self.lock:
             self.state['rows'] = [current if r['username'] == username else r for r in self.state['rows']]
             paused = bool(self._api_auditor and (self._api_auditor.disabled or self._api_auditor.used(self.state['run_id']) >= settings.ai_max_audits))
@@ -488,8 +497,21 @@ class JobRunner:
                                 ai_tried.add(row['username'])
                         waiting = [row for row in waiting if row['username'] not in ai_tried]
                 if settings.ai_enabled and self._api_auditor and ai_pending is None and waiting:
-                    row = min(waiting, key=lambda r: (r.get('ai_audit_status') == 'error', r.get('local_status') not in ('top', 'recommended'), r['username']))
+                    collection_has_work = bool(pending or self.state.get('queue') or
+                                               any(not cursor['exhausted'] or cursor['buffer'] for cursor in self.state.get('query_state', {}).values()))
+                    warming = (not ai_only and not ai_tried and collection_has_work
+                               and len(self.state['rows']) < min(12, settings.audit_budget)
+                               and len(waiting) < min(8, settings.target_count))
+                else:
+                    warming = False
+                if warming:
+                    with self.lock:
+                        self.state['ai_stage'] = 'Собираю начальную выборку для приоритета AI: ' + str(len(self.state['rows'])) + ' публичных аудитов'
+                if settings.ai_enabled and self._api_auditor and ai_pending is None and waiting and not warming:
+                    row = min(waiting, key=priority_key)
                     ai_username = row['username']
+                    priority = ai_priority(row)
+                    self.log(f"AI-очередь: {ai_username}, приоритет {priority['ai_priority_score']}/100; " + priority['ai_priority_reason'])
                     ai_tried.add(ai_username)
                     with self.lock:
                         self.state['ai_stage'] = 'AI-анализ ' + ai_username
@@ -651,6 +673,7 @@ class JobRunner:
             row = self._evaluate(row, settings)
             row = auditor.audit(row, self.state['run_id'], self.state.get('niche', ''), load_profile(self.repo))
             row = self._evaluate(row, settings)
+            self.log(f"{username}: {row['verdict']}; итог после AI-аудита сохранённых постов")
             with self.lock:
                 self.state['rows'] = [row if r['username'] == username else r for r in self.state['rows']]
             self._persist()

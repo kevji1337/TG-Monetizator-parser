@@ -30,6 +30,11 @@ COLUMNS = {
     'ai_audit_status': 'Статус AI-аудита API', 'ai_detail': 'Причина пропуска или ошибки AI',
     'api_ai_review': 'Разбор и черновик Gemini API', 'local_verdict': 'Вердикт локальных правил',
     'ai_queued': 'Ожидает AI-разбора',
+    'ai_priority_score': 'Приоритет очереди AI, 0–100', 'ai_priority_reason': 'Причины приоритета AI',
+    'selection_bucket_label': 'Главная причина результата',
+    'next_contact_date': 'Дата следующего контакта', 'next_action_label': 'Следующее действие',
+    'contact_plan_note': 'Пояснение к действию', 'contact_plan_state': 'Срок действия',
+    'last_action_at': 'Последнее выполненное действие (UTC)',
 }
 
 

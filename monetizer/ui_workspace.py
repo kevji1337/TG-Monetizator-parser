@@ -11,13 +11,17 @@ from .ai_audit import STATUS_LABELS
 from .ai_responses import latest_response
 from .ui_quality import quality_panel
 from .preferences import Preferences, PersistentUI
+from .ui_candidates import candidate_card, contact_plan_editor, contact_plan_panel
 
 
 def assessment_stale(row):
     return bool(row.get('assessment_stale') or row.get('classification', {}).get('rule_version') != RULE_VERSION)
 
 
-def show_evidence(row, repo=None):
+def show_evidence(row, repo=None, running=False):
+    candidate_card(row)
+    if repo is not None:
+        contact_plan_editor(repo, row, running)
     if assessment_stale(row):
         st.warning('Автоматическая оценка устарела. Откройте нужный запуск из истории и пересчитайте сохранённые оценки в разделе «Поиск».')
     st.caption("Тип: " + TYPE_LABELS.get(row.get("channel_type"), "Не установлено") + " · Тематика: " + row.get("relevance", "unknown"))
@@ -25,7 +29,7 @@ def show_evidence(row, repo=None):
         st.caption('AI: ' + STATUS_LABELS.get(row['ai_audit_status'], row['ai_audit_status']) + ' · ' + row.get('ai_detail', ''))
     api_review = row.get('api_ai_review')
     if api_review:
-        with st.expander('Анализ Gemini через API', expanded=True):
+        with st.expander('Подробный анализ Gemini через API', expanded=False):
             st.text(api_review['reason'])
             for warning in api_review.get('validation_warnings', []):
                 st.warning(warning)
@@ -112,12 +116,13 @@ def database_panel(runner, running):
     st.dataframe(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"),
                                "Отбор": '⏳ Оценка устарела' if assessment_stale(r) else r.get("verdict"),
                                "Тип": TYPE_LABELS.get(r.get('channel_type'), 'Не установлено'),
-                               "Работа": WORK_STATUSES[r["work_status"]], "Заметка": r["notes"]} for r in visible]), hide_index=True, width="stretch")
+                               "Работа": WORK_STATUSES[r["work_status"]], "Следующий контакт": r.get('next_contact_date', ''),
+                               "Действие": r.get('next_action_label', ''), "Заметка": r["notes"]} for r in visible]), hide_index=True, width="stretch")
     if not visible:
         return
     username = st.selectbox("Карточка кандидата", [r["username"] for r in visible])
     row = next(r for r in visible if r["username"] == username)
-    show_evidence(row, runner.repo)
+    show_evidence(row, runner.repo, running)
     status = st.selectbox("Рабочий статус", list(WORK_STATUSES), index=list(WORK_STATUSES).index(row["work_status"]),
                           format_func=WORK_STATUSES.get, key=f"crm_status_{username}")
     notes = st.text_area("Заметка о кандидате", row["notes"], key=f"crm_notes_{username}")
@@ -209,6 +214,6 @@ def batch_panel(runner, running):
 
 def render_workspace(runner, section):
     running = runner.snapshot()["status"] in ("running", "stopping")
-    panels = {'База кандидатов': database_panel, 'История запусков': history_panel,
+    panels = {'База кандидатов': database_panel, 'План контактов': contact_plan_panel, 'История запусков': history_panel,
               'Пакет ChatGPT': batch_panel, 'Качество отбора': lambda r, active: quality_panel(r.repo, active)}
     panels[section](runner, running)

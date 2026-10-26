@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 from .audit import normalize_username
 from .ai_responses import SCHEMA as AI_RESPONSE_SCHEMA
+from .contact_plans import SCHEMA as CONTACT_SCHEMA, ACTIONS, validate_plan, plan_state
+from .candidate_insights import ai_priority, selection_bucket, BUCKETS
 
 WORK_STATUSES = {"new": "Не разобран", "qualified": "Подходит", "unsuitable": "Не подходит",
                  "contacted": "Написал", "replied": "Ответил", "declined": "Отказ"}
@@ -52,6 +54,7 @@ class Repository:
                 PRAGMA user_version=1;
             """)
             db.execute(AI_RESPONSE_SCHEMA)
+            db.execute(CONTACT_SCHEMA)
 
     @contextmanager
     def connect(self):
@@ -115,6 +118,9 @@ class Repository:
     def enrich_rows(self, rows):
         with self.connect() as db:
             stored = {r["username"]: r for r in db.execute("SELECT username,work_status,notes,draft FROM channels")}
+            plans = {r['username']: dict(r) for r in db.execute('SELECT * FROM contact_plans')}
+            completed = {r['username']: r['completed_at'] for r in db.execute(
+                "SELECT username,max(created_at) AS completed_at FROM events WHERE kind='contact_plan_done' GROUP BY username")}
             reviews = {}
             for review in db.execute("SELECT username,data FROM ai_reviews ORDER BY rowid"):
                 reviews[review["username"]] = json.loads(review["data"])
@@ -124,6 +130,12 @@ class Repository:
             crm = stored.get(username)
             row.update(work_status=crm["work_status"] if crm else "new", notes=crm["notes"] if crm else "")
             row["work_status_label"] = WORK_STATUSES[row["work_status"]]
+            plan = plans.get(username, {})
+            row.update(next_contact_date=plan.get('due_date', ''), next_action=plan.get('action', ''),
+                       next_action_label=ACTIONS.get(plan.get('action'), ''), contact_plan_note=plan.get('note', ''),
+                       contact_plan_state=plan_state(plan.get('due_date', '')), last_action_at=completed.get(username, ''))
+            row.update(ai_priority(row))
+            row['selection_bucket_label'] = BUCKETS[selection_bucket(row)]
             if crm and crm["draft"]:
                 row.update(json.loads(crm["draft"]))
             if username in reviews:
@@ -174,6 +186,39 @@ class Repository:
             db.execute("UPDATE channels SET work_status=?,notes=? WHERE username=?", (work_status, notes, username))
             db.execute("INSERT INTO events(username,created_at,kind,data) VALUES(?,?,?,?)",
                        (username, datetime.now(timezone.utc).isoformat(), "crm", dumps({"before": dict(old), "after": {"work_status": work_status, "notes": notes}})))
+
+    def save_contact_plan(self, username, due_date, action='first_message', note=''):
+        username = normalize_username(username)
+        plan = None
+        if due_date is not None:
+            due_date, action, note = validate_plan(due_date, action, note)
+            plan = {'due_date': due_date, 'action': action, 'note': note}
+        with self.connect() as db:
+            if not db.execute('SELECT 1 FROM channels WHERE username=?', (username,)).fetchone():
+                raise ValueError('Канал отсутствует в базе')
+            previous = db.execute('SELECT due_date,action,note FROM contact_plans WHERE username=?', (username,)).fetchone()
+            before = dict(previous) if previous else None
+            if before == plan:
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            if plan is None:
+                db.execute('DELETE FROM contact_plans WHERE username=?', (username,))
+            else:
+                db.execute('INSERT INTO contact_plans(username,due_date,action,note,updated_at) VALUES(?,?,?,?,?) '
+                           'ON CONFLICT(username) DO UPDATE SET due_date=excluded.due_date,action=excluded.action,note=excluded.note,updated_at=excluded.updated_at',
+                           (username, due_date, action, note, now))
+            db.execute('INSERT INTO events(username,created_at,kind,data) VALUES(?,?,?,?)',
+                       (username, now, 'contact_plan', dumps({'before': before, 'after': plan})))
+
+    def complete_contact_plan(self, username):
+        username = normalize_username(username)
+        with self.connect() as db:
+            previous = db.execute('SELECT due_date,action,note FROM contact_plans WHERE username=?', (username,)).fetchone()
+            if previous is None:
+                raise ValueError('Нет запланированного действия')
+            db.execute('DELETE FROM contact_plans WHERE username=?', (username,))
+            db.execute('INSERT INTO events(username,created_at,kind,data) VALUES(?,?,?,?)',
+                       (username, datetime.now(timezone.utc).isoformat(), 'contact_plan_done', dumps(dict(previous))))
 
     def save_draft(self, username, draft):
         with self.connect() as db:

@@ -27,7 +27,7 @@ REVIEW_METADATA = ('cache_key', 'created_at', 'model', 'prompt_version', 'reques
                    'response_model', 'actual_model', 'proxy_version', 'request_id', 'usage',
                    'elapsed_seconds', 'first_event_seconds', 'prompt_bytes', 'sources_truncated', 'validation_warnings')
 STATUS_LABELS = {
-    'pending': 'Ожидает AI-аудита', 'success': 'Проверено AI', 'cached': 'AI из кэша',
+    'pending': 'Ожидает AI-аудита', 'success': 'Ответ AI проверен', 'cached': 'AI из кэша',
     'budget': 'Лимит AI-аудитов исчерпан', 'rate_limit': 'Локальный лимит частоты AI',
     'missing_key': 'API-ключ не введён', 'error': 'Ошибка AI — требуется проверка',
     'stopped': 'AI-разбор остановлен', 'insufficient': 'Недостаточно источников для AI',
@@ -421,8 +421,9 @@ class ProxyAuditor:
             try:
                 save_response(self.repo, attempt_id, run_id, row['username'], key, data, reply.content, metadata)
                 response_saved = True
-            except (sqlite3.Error, OSError):
-                self.log(f"AI {row['username']}: не удалось сохранить диагностическую копию ответа")
+            except (sqlite3.Error, OSError) as exc:
+                code = getattr(exc, 'sqlite_errorname', type(exc).__name__)
+                self.log(f"AI {row['username']}: не удалось сохранить диагностическую копию ответа ({code}); оценка проверяется отдельно")
             content = reply.content.strip()
             if content.startswith('```') and content.endswith('```'):
                 content = content.split('\n', 1)[1].rsplit('```', 1)[0].strip()
