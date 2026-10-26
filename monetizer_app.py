@@ -27,6 +27,8 @@ from monetizer.profile import profile_version
 from monetizer.diagnostics import logger
 from monetizer.preferences import Preferences, PersistentUI, api_key_field, last_run_preferences
 from monetizer.candidate_insights import selection_summary, selection_bucket, ai_priority, priority_key, BUCKETS
+from monetizer.ui_tgstat_profiles import profile_picker
+from monetizer.tgstat_profiles import TGStatProfiles
 
 PAGE_STARTED = time.perf_counter()
 
@@ -102,6 +104,7 @@ with st.sidebar:
         keep_browser = ui.checkbox('Оставлять Chrome открытым при ошибке', value=True)
         browser_wait = ui.number_input('Ожидание ручного входа, секунд', 0, 1800, 300, step=30)
     mode = ui.radio("Источник", ["TGStat — каталог тематик", "Список каналов — только аудит"])
+    tgstat_profile_id = profile_picker(runner, ui) if mode.startswith('TGStat') else 'default'
     snapshot = load_categories()
     labels = {c['id']: c['title'] for c in snapshot['categories']}
     previous = st.session_state.get('tgstat_category_ids')
@@ -122,7 +125,7 @@ with st.sidebar:
                 try:
                     with st.spinner('Читаю список тематик TGStat в Chrome…'):
                         refresh_categories(Settings(dev_mode=dev_mode, keep_browser_on_error=keep_browser,
-                                                    browser_wait_seconds=browser_wait))
+                                                    browser_wait_seconds=browser_wait, tgstat_profile_id=tgstat_profile_id))
                     st.rerun()
                 except Exception as exc:
                     st.error(f'Не удалось обновить тематики: {exc}')
@@ -190,6 +193,7 @@ with st.sidebar:
                                 max_daily_reach=daily_to, min_ci=ci_from, max_ci=ci_to,
                                 exclude_dead=exclude_dead, exclude_scam=exclude_scam, exclude_red_label=exclude_red,
                                 dev_mode=dev_mode, keep_browser_on_error=keep_browser, browser_wait_seconds=browser_wait,
+                                tgstat_profile_id=tgstat_profile_id,
                                 ai_enabled=ai_enabled, **ai_config)
             usernames = re.split(r"[\s,;]+", channels_text.strip()) if channels_text.strip() else []
             if not mode.startswith("TGStat") and not usernames:
@@ -262,6 +266,8 @@ def results_panel():
                     'Сохранённые каналы доступны для отдельного AI-разбора. Для возобновления поиска может потребоваться вход в Chrome.'))
     if state.get("niche"):
         st.caption(f"Текущий отчёт: {state['niche']}")
+        if not state.get('manual') and not state.get('ai_only'):
+            st.caption('Профиль TGStat этого запуска: ' + TGStatProfiles(runner.repo).name(state.get('settings', {}).get('tgstat_profile_id', 'default')))
     if running:
         st.progress(min(green / state["settings"]["target_count"], 1.0),
                     text=f"Подходят {green}; проверено {len(rows)}; найдено {count_found}")
@@ -281,6 +287,7 @@ def results_panel():
                 resume_config = {**state["settings"], "max_audits": audit_budget, "max_minutes": time_limit,
                                  "login_wait_seconds": 60 if login_pause else 0,
                                  'dev_mode': dev_mode, 'keep_browser_on_error': keep_browser, 'browser_wait_seconds': browser_wait,
+                                 'tgstat_profile_id': tgstat_profile_id,
                                  'ai_enabled': ai_enabled, **ai_config}
                 runner.start(settings=Settings.from_saved(resume_config), resume=True, api_key=ai_key)
                 st.rerun()

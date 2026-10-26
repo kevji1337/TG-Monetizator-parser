@@ -82,9 +82,11 @@ def retain(search):
         _retained[search.session_id] = search
 
 
-def retained_sessions():
+def retained_sessions(include_url=True):
     with _lock:
-        return [{'session_id': s.session_id, 'stage': s.stage, 'url': s.location()} for s in _retained.values()]
+        return [{'session_id': s.session_id, 'stage': s.stage, 'url': s.location() if include_url else '',
+                 'profile_id': getattr(s.settings, 'tgstat_profile_id', 'default'),
+                 'purpose': getattr(s, 'purpose', 'diagnostics')} for s in _retained.values()]
 
 
 def close_retained(session_id):

@@ -107,6 +107,7 @@ def last_run_preferences(state):
         'ai_prompt_bytes': ('number_input', 'Лимит текста AI-запроса, байт UTF-8'),
         'dev_mode': ('checkbox', 'Dev-режим'), 'keep_browser_on_error': ('checkbox', 'Оставлять Chrome открытым при ошибке'),
         'browser_wait_seconds': ('number_input', 'Ожидание ручного входа, секунд'),
+        'tgstat_profile_id': ('selectbox', 'Профиль TGStat'),
         'country_ids': ('multiselect', 'Страна канала'), 'language_ids': ('multiselect', 'Язык канала'),
         'channel_type': ('selectbox', 'Тип канала'), 'micro_id': ('selectbox', 'Проверять конкретную специализацию'),
         'target_count': ('number_input', 'Цель: подходящих каналов'), 'new_only': ('checkbox', 'Искать только новые каналы'),

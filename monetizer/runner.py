@@ -22,7 +22,7 @@ from .search import TGStatSearch, SearchBudgetExceeded
 from .settings import Settings
 from .categories import category_key, category_label, category_id_from_key, CATEGORY_RULES_VERSION
 from .tgstat_filters import filter_spec
-from .diagnostics import BrowserControl, logger
+from .diagnostics import BrowserControl, logger, retained_sessions
 from .ai_audit import ProxyAuditor, apply_assessment, PROMPT_VERSION, QUEUE_VERSION, needs_ai, cache_key, request_data
 from .candidate_insights import ai_priority, priority_key, PRIORITY_VERSION
 
@@ -117,7 +117,8 @@ class JobRunner:
                           time.perf_counter() - started, len(self.state['rows']), self.state.get('assessment_pending', 0))
 
     def _signature(self, row, settings, profile):
-        return hashlib.sha256(dumps([content_hash(row), settings.to_dict(), self.state.get('niche', ''),
+        assessment_settings = {key: value for key, value in settings.to_dict().items() if key != 'tgstat_profile_id'}
+        return hashlib.sha256(dumps([content_hash(row), assessment_settings, self.state.get('niche', ''),
                                      RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, PROMPT_VERSION, QUEUE_VERSION, PRIORITY_VERSION, profile_version(profile),
                                      datetime.now(timezone.utc).date().isoformat()]).encode()).hexdigest()
 
@@ -270,12 +271,17 @@ class JobRunner:
                 raise ValueError('Для отдельного AI-разбора откройте сохранённый запуск и включите AI')
             if settings.ai_enabled and not runtime_key:
                 raise ValueError('Введите API-ключ в разделе «AI-аудит Gemini» или задайте MONETIZER_AI_KEY')
+            if (resume and not ai_only and settings.tgstat_profile_id != self.state['settings'].get('tgstat_profile_id', 'default')):
+                raise ValueError('Продолжение привязано к исходному профилю TGStat. Выберите его; другой профиль используется в новом поиске.')
+            uses_tgstat = not ai_only and not (self.state.get('manual') if resume else bool(usernames))
+            if uses_tgstat and retained_sessions(include_url=False):
+                raise RuntimeError('Перед поиском закройте Chrome кнопкой в «Управление профилями TGStat» или в Dev-диагностике.')
             guard = RunGuard(self.repo.path)
             guard.__enter__()
             if not resume:
                 scope_data = {k: v for k, v in settings.to_dict().items() if k not in (
                     "target_count", "max_audits", "max_minutes", "new_only", "workers", "requests_per_second", "login_wait_seconds", "retries", "connect_timeout", "read_timeout",
-                    'dev_mode', 'keep_browser_on_error', 'browser_wait_seconds')}
+                    'dev_mode', 'keep_browser_on_error', 'browser_wait_seconds', 'tgstat_profile_id')}
                 self.state = {"run_id": uuid4().hex, "settings": settings.to_dict(), "queries": queries,
                               "query_scope": hashlib.sha256(dumps([niche, scope_data, RULE_VERSION, CATALOG_VERSION, CATEGORY_RULES_VERSION]).encode()).hexdigest(),
                               "niche": niche.strip(), "manual": bool(usernames), "rows": [], "logs": [], "paths": [],

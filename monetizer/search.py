@@ -1,7 +1,6 @@
 """One visible Chrome, resumable query/page positions, no background server."""
 import threading
 import time
-from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -12,7 +11,8 @@ from .categories import (CACHE_PATH, category_key, category_id_from_key, validat
                          load_categories)
 from .export import atomic_json
 from .tgstat_filters import filter_spec
-from .diagnostics import diagnosed, logger, safe_url, retain, BrowserControl
+from .diagnostics import diagnosed, logger, safe_url, retain, retained_sessions, BrowserControl
+from .tgstat_profiles import profile_directory, ROOT as PROFILE_ROOT
 
 
 class RetryAfterLogin(Exception):
@@ -27,6 +27,7 @@ class TGStatSearch:
     def __init__(self, settings, stop=None, log=print, deadline=None, control=None):
         self.settings, self.stop, self.log = settings, stop or threading.Event(), log
         self.deadline, self.driver = deadline, None
+        self._chrome_guard = None
         self.current_query, self.current_page = None, -1
         self.applied_filters = None
         self._unavailable_urls = set()
@@ -68,6 +69,25 @@ class TGStatSearch:
 
     @diagnosed('browser_start')
     def _open(self):
+        from .runner import RunGuard
+        self._check()
+        if retained_sessions(include_url=False):
+            raise RuntimeError('Chrome этого проекта уже оставлен открытым. Закройте его кнопкой в «Управление профилями TGStat» '
+                               'или в Dev-диагностике, затем запустите поиск.')
+        profile = profile_directory(self.settings.tgstat_profile_id)
+        guard = RunGuard(PROFILE_ROOT / 'chrome_browser.session')
+        try:
+            guard.__enter__()
+        except RuntimeError:
+            raise RuntimeError('Chrome этого проекта уже используется. Закройте его окно в панели перед новым открытием.') from None
+        self._chrome_guard = guard
+        try:
+            self._launch_browser(profile)
+        except Exception:
+            self.close(force=True)
+            raise
+
+    def _launch_browser(self, profile):
         import undetected_chromedriver as uc
         from .browser import prepare_driver
         class QuietChrome(uc.Chrome):
@@ -86,8 +106,7 @@ class TGStatSearch:
         options = uc.ChromeOptions()
         options.add_argument("--start-maximized")
         options.add_argument("--no-first-run")
-        profile = Path(__file__).resolve().parents[1] / "results" / "monetizer" / "chrome_profile"
-        profile.mkdir(parents=True, exist_ok=True)
+        logger().info('session=%s TGStat profile=%s', self.session_id, self.settings.tgstat_profile_id)
         self.log("Открываю Chrome для TGStat; при необходимости пройдите проверку в его окне.")
         self.driver = QuietChrome(options=options, user_data_dir=str(profile), driver_executable_path=driver_path,
                                   browser_executable_path=browser_path, version_main=major)
@@ -331,6 +350,9 @@ class TGStatSearch:
                 logger().exception('session=%s browser close failed', self.session_id)
             self.driver = None
             logger().info('session=%s browser closed', self.session_id)
+        if self._chrome_guard is not None:
+            self._chrome_guard.__exit__()
+            self._chrome_guard = None
 
     def __exit__(self, *args):
         self.close()
