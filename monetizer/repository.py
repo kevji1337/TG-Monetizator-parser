@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .audit import normalize_username
+from .ai_responses import SCHEMA as AI_RESPONSE_SCHEMA
 
 WORK_STATUSES = {"new": "Не разобран", "qualified": "Подходит", "unsuitable": "Не подходит",
                  "contacted": "Написал", "replied": "Ответил", "declined": "Отказ"}
@@ -50,6 +51,7 @@ class Repository:
                 CREATE INDEX IF NOT EXISTS idx_api_ai_time ON api_ai_attempts(endpoint,started_at);
                 PRAGMA user_version=1;
             """)
+            db.execute(AI_RESPONSE_SCHEMA)
 
     @contextmanager
     def connect(self):

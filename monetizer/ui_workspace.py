@@ -8,6 +8,7 @@ from .export import csv_bytes, xlsx_bytes
 from .repository import WORK_STATUSES
 from .qualification import TYPE_LABELS, CONTENT_LABELS, RULE_VERSION
 from .ai_audit import STATUS_LABELS
+from .ai_responses import latest_response
 from .ui_quality import quality_panel
 from .preferences import Preferences, PersistentUI
 
@@ -16,7 +17,7 @@ def assessment_stale(row):
     return bool(row.get('assessment_stale') or row.get('classification', {}).get('rule_version') != RULE_VERSION)
 
 
-def show_evidence(row):
+def show_evidence(row, repo=None):
     if assessment_stale(row):
         st.warning('Автоматическая оценка устарела. Откройте нужный запуск из истории и пересчитайте сохранённые оценки в разделе «Поиск».')
     st.caption("Тип: " + TYPE_LABELS.get(row.get("channel_type"), "Не установлено") + " · Тематика: " + row.get("relevance", "unknown"))
@@ -26,6 +27,8 @@ def show_evidence(row):
     if api_review:
         with st.expander('Анализ Gemini через API', expanded=True):
             st.text(api_review['reason'])
+            for warning in api_review.get('validation_warnings', []):
+                st.warning(warning)
             st.caption('Запрошенная модель: ' + api_review.get('requested_model', api_review.get('model', '')) +
                        ' · исходный вердикт правил: ' + row.get('local_verdict', ''))
             st.caption('Фактическая модель: ' + (api_review.get('actual_model') or 'не сообщается Chat Completions; смотрите Requests в web2api'))
@@ -44,6 +47,23 @@ def show_evidence(row):
             if api_review.get('message'):
                 st.text_area('Черновик Gemini — отдельно от сохранённого сообщения', api_review['message'], disabled=True)
                 st.download_button('Скачать черновик Gemini', api_review['message'], f"gemini_{row['username'].lstrip('@')}.txt", mime='text/plain')
+    if repo is not None and row.get('ai_audit_status') in ('success', 'cached', 'error'):
+        with st.expander('Диагностика последнего ответа AI'):
+            response = latest_response(repo, row['username'], row['ai_request_key']) if row.get('ai_request_key') else None
+            if response is None:
+                st.caption('Сохранённого ответа нет. В предыдущих версиях отклонённый JSON не сохранялся; восстановить его по логу нельзя.')
+            else:
+                st.caption('Ответ сохранён локально до проверки. Это недоверенные данные модели, не подтверждённые факты.')
+                st.caption('Запуск: ' + response['run_id'] + ' · ' + response.get('validation_error', ''))
+                st.code(response['content'][:50000], language='json')
+                st.download_button('Скачать ответ AI для разбора',
+                                   json.dumps({**{key: response[key] for key in ('run_id', 'cache_key', 'metadata', 'content', 'validation_error')},
+                                               'input_sources': response['context']['sources'],
+                                               'topic': response['context'].get('topic', '')}, ensure_ascii=False, indent=2),
+                                   f"ai_response_{row['username'].lstrip('@')}.json", mime='application/json')
+                st.caption('Исходное описание, переданное в этом запросе:')
+                description = next((s['text'] for s in response['context']['sources'] if s['id'] == 'description'), '')
+                st.text(description or 'Описание отсутствовало')
     st.link_button("Посмотреть публичную ленту Telegram", 'https://t.me/s/' + row['username'].lstrip('@'))
     classification = row.get('classification', {})
     summary = classification.get('content_summary')
@@ -97,7 +117,7 @@ def database_panel(runner, running):
         return
     username = st.selectbox("Карточка кандидата", [r["username"] for r in visible])
     row = next(r for r in visible if r["username"] == username)
-    show_evidence(row)
+    show_evidence(row, runner.repo)
     status = st.selectbox("Рабочий статус", list(WORK_STATUSES), index=list(WORK_STATUSES).index(row["work_status"]),
                           format_func=WORK_STATUSES.get, key=f"crm_status_{username}")
     notes = st.text_area("Заметка о кандидате", row["notes"], key=f"crm_notes_{username}")

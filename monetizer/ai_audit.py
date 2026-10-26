@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import re
+import sqlite3
 import time
 
 from .audit import normalize_username
@@ -16,13 +17,15 @@ from .pitches import PLAYBOOK, PLAYBOOK_VERSION, evidence_sources
 from .qualification import CHANNEL_TYPES, RULE_VERSION, _independent_sources
 from .repository import dumps
 from .web2api import ProxyError, chat_completion, inspect_proxy
+from .ai_evidence import catalogue, prompt_data
+from .ai_responses import save_response, set_result
 
-PROMPT_VERSION = 'expert-audit-3'
+PROMPT_VERSION = 'expert-audit-4'
 CACHE_SECONDS = 24 * 3600
 QUEUE_VERSION = 'ai-queue-1'
 REVIEW_METADATA = ('cache_key', 'created_at', 'model', 'prompt_version', 'requested_model',
                    'response_model', 'actual_model', 'proxy_version', 'request_id', 'usage',
-                   'elapsed_seconds', 'first_event_seconds', 'prompt_bytes', 'sources_truncated')
+                   'elapsed_seconds', 'first_event_seconds', 'prompt_bytes', 'sources_truncated', 'validation_warnings')
 STATUS_LABELS = {
     'pending': 'Ожидает AI-аудита', 'success': 'Проверено AI', 'cached': 'AI из кэша',
     'budget': 'Лимит AI-аудитов исчерпан', 'rate_limit': 'Локальный лимит частоты AI',
@@ -93,12 +96,17 @@ def response_prompt(data, key):
         'Для expert нужны два независимых источника о личной практике, включая хотя бы один пост. '
         'Одних названия, просмотров, названия инструмента, «разбираю» или «показываю» недостаточно. '
         'Пересылки не доказывают практику автора. При конфликте или недостатке текстов — unknown. '
-        'В reason объясни решение. Для определённого типа или темы приведи evidence: '
-        '[{"source_id":"точный ID из sources","quote":"короткая дословная цитата, желательно 80–250 символов"}]. '
-        'Ссылки url не составляй и не возвращай: программа подставит их по source_id. '
-        'Цитаты нельзя перефразировать или соединять с многоточием. '
+        'В reason объясни решение. Тексты источников разбиты на дословные fragments. '
+        'Для определённого типа или темы приведи evidence: [{"ref":"ID подходящего fragments.ref"}]. '
+        'Не переписывай цитаты, не возвращай quote, source_id или url: программа сама подставит '
+        'дословный фрагмент и исходную ссылку по выбранному ref. Выбирай ref только за смысловое '
+        'подтверждение вывода, а не за знакомое слово. Для expert нужны ref из разных источников. '
         'offers: [{kind: consultation|education|service|booking, ownership: self_reported|unknown|third_party, '
-        'source_id, quote, prices: [точные строки], booking_methods: [точные строки/ссылки]}]. '
+        'ref: ID фрагмента с предложением, price_refs: [ID из price_options], booking_refs: [ID из booking_options]}]. '
+        'price_refs и booking_refs выбирай только из того же источника, что ref оффера. '
+        'Не составляй цены или способы записи своими словами. Если подходящего варианта нет, верни []. '
+        'Наличие ссылки в booking_options ещё не делает её способом записи: не выбирай ссылки '
+        'на материалы, другие каналы или рекламу без связи с предложением. '
         'Чужие и пересланные предложения не приписывай автору. Отсутствие предложения в выборке '
         'не означает отсутствие продукта. Наличие продюсера неизвестно. '
         'message: для expert с matched — черновик первого сообщения до 1000 символов с конкретной '
@@ -109,9 +117,9 @@ def response_prompt(data, key):
         'Не придумывай продажи, доход, авторство, цены и наличие/отсутствие команды. '
         'Дополнительные правила сообщений: ' + dumps(PLAYBOOK['global_rules']) + '\n'
         'Запрещённые утверждения: ' + dumps(PLAYBOOK['forbidden_claims']) + '\n'
-        'Схема: ' + dumps(template) + '\nДанные: ' + dumps(data) + '\n'
+        'Схема: ' + dumps(template) + '\nДанные: ' + dumps(prompt_data(data)) + '\n'
         'Конец данных. Верни один JSON-объект без Markdown и пояснений. '
-        'В evidence/offer используй только source_id из данных и непрерывную дословную цитату. '
+        'В evidence/offers используй только ref из fragments. Цитаты, цены, ссылки и контакты не переписывай. '
         'Если доказательств недостаточно, используй unknown, а не придумывай их.'
     )
 
@@ -146,24 +154,39 @@ def validate_review(value, data, key):
             raise ValueError('AI вернул некорректное текстовое поле')
         return item
     text(value.get('reason'), empty=False)
-    text(value.get('message'), 1000)
     sources = {s['id']: s for s in data['sources']}
+    _, references, facts = catalogue(data)
+    warnings = []
     canonical = {}
     def proof(item, location):
-        if not isinstance(item, dict) or not isinstance(item.get('source_id'), str) or item['source_id'] not in sources:
+        if not isinstance(item, dict):
             raise ValueError(f'AI указал неизвестный источник: {location}')
-        source = sources[item['source_id']]
-        quote = text(item.get('quote'), 1000, False)
-        actual = original_quote(quote, source['text'])
-        if actual is None:
-            raise ValueError(f"Цитата не найдена в тексте источника {source['id']}: {location}")
+        ref = item.get('ref')
+        if ref is not None:
+            if not isinstance(ref, str) or ref not in references:
+                raise ValueError(f'AI указал неизвестный ID фрагмента: {location}')
+            reference = references[ref]
+            if item.get('source_id', reference['source_id']) != reference['source_id']:
+                raise ValueError(f'ID фрагмента AI не соответствует источнику: {location}')
+            source = sources[reference['source_id']]
+            actual = reference['quote']
+        else:
+            if not isinstance(item.get('source_id'), str) or item['source_id'] not in sources:
+                raise ValueError(f'AI указал неизвестный источник: {location}')
+            source = sources[item['source_id']]
+            quote = text(item.get('quote'), 1000, False)
+            actual = original_quote(quote, source['text'])
+            if actual is None:
+                raise ValueError(f"Цитата не найдена в тексте источника {source['id']}: {location}")
         # URLs come from our own captured source, never from model-generated URLs.
         canonical[id(item)] = {'source_id': source['id'], 'url': source.get('url', ''),
                                'quote': actual, 'date': source.get('date', '')}
+        if ref is not None:
+            canonical[id(item)]['ref'] = ref
         return source
     evidence, offers = value.get('evidence'), value.get('offers')
-    if not isinstance(evidence, list) or len(evidence) > 20 or not isinstance(offers, list) or len(offers) > 30:
-        raise ValueError('AI вернул некорректные доказательства или офферы')
+    if not isinstance(evidence, list) or len(evidence) > 20:
+        raise ValueError('AI вернул некорректные доказательства классификации')
     proofs = [proof(e, f'evidence[{index}]') for index, e in enumerate(evidence)]
     if (value['channel_type'] != 'unknown' or value['relevance'] != 'unknown') and not proofs:
         raise ValueError('Классификация AI требует цитат')
@@ -171,36 +194,71 @@ def validate_review(value, data, key):
         independent = _independent_sources(proofs)
         if len(independent) < 2 or not any(s['id'] != 'description' for s in independent):
             raise ValueError('Для expert нужны два независимых источника, включая пост, без пересылок')
-    if value['message'] and (value['channel_type'] != 'expert' or value['relevance'] != 'matched' or not proofs):
-        raise ValueError('Сообщение допустимо только для подходящего эксперта с доказательствами')
-    if any('(' not in claim and claim.casefold() in value['message'].casefold() for claim in PLAYBOOK['forbidden_claims']):
-        raise ValueError('Сообщение AI содержит запрещённое утверждение')
-    offer_values = {}
+    if not isinstance(offers, list) or len(offers) > 30:
+        warnings.append('Офферы отброшены: неверный формат списка')
+        offers = []
+    verified_offers = []
     for index, offer in enumerate(offers):
-        source = proof(offer, f'offers[{index}]')
-        if offer.get('kind') not in ('consultation', 'education', 'service', 'booking') or offer.get('ownership') not in ('self_reported', 'unknown', 'third_party'):
-            raise ValueError('AI вернул неверный тип оффера')
-        if source.get('forwarded') and offer['ownership'] == 'self_reported':
-            raise ValueError('AI приписал автору пересланный оффер')
-        for field in ('prices', 'booking_methods'):
-            items = offer.get(field, [])
+        try:
+            source = proof(offer, f'offers[{index}]')
+            if offer.get('kind') not in ('consultation', 'education', 'service', 'booking') or offer.get('ownership') not in ('self_reported', 'unknown', 'third_party'):
+                raise ValueError('AI вернул неверный тип оффера')
+            if source.get('forwarded') and offer['ownership'] == 'self_reported':
+                raise ValueError('AI приписал автору пересланный оффер')
+        except ValueError as exc:
+            warnings.append(f'Оффер {index + 1} отброшен: {exc}')
+            continue
+        verified = {**canonical[id(offer)], 'kind': offer['kind'], 'ownership': offer['ownership']}
+        for field, ref_field, kind in (('prices', 'price_refs', 'price'), ('booking_methods', 'booking_refs', 'booking')):
+            items = offer.get(ref_field, offer.get(field, []))
+            values, value_proofs = [], []
             if not isinstance(items, list) or len(items) > 10 or any(not isinstance(v, str) or not v for v in items):
-                raise ValueError('Цена или запись AI не подтверждена')
-            actual_values = []
+                warnings.append(f'offers[{index}].{field}: неверный формат; значения отброшены')
+                items = []
             for item in items:
-                actual = item if item in source.get('links', []) else original_quote(item, canonical[id(offer)]['quote'])
-                if actual is None:
-                    raise ValueError(f'Цена или запись AI не подтверждена: offers[{index}].{field}')
-                actual_values.append(actual)
-            offer_values[(id(offer), field)] = actual_values
+                fact = facts.get(item) if ref_field in offer else None
+                if ref_field not in offer:
+                    actual = item if item in source.get('links', []) else original_quote(item, source['text'])
+                    if actual is not None:
+                        fact = next((v for v in facts.values() if v['source_id'] == source['id']
+                                     and v['kind'] == kind and v['value'] == actual), None)
+                        if fact is None and kind == 'booking':
+                            fact = {'source_id': source['id'], 'kind': kind, 'value': actual,
+                                    'quote_ref': next((r for r, v in references.items() if v['source_id'] == source['id'] and actual in v['quote']), ''),
+                                    'origin': 'html_link' if actual in source.get('links', []) else 'text'}
+                if fact is None or fact['source_id'] != source['id'] or fact['kind'] != kind:
+                    warnings.append(f'offers[{index}].{field}: неподтверждённое значение отброшено')
+                    continue
+                if fact['value'] in values:
+                    continue
+                values.append(fact['value'])
+                excerpt = references.get(fact['quote_ref'], {})
+                value_proofs.append({'source_id': source['id'], 'url': source.get('url', ''), 'date': source.get('date', ''),
+                                     'value': fact['value'], 'quote': excerpt.get('quote') or (fact['value'] if fact['origin'] == 'text' else ''),
+                                     'origin': fact['origin']})
+            verified[field], verified[field + '_evidence'] = values, value_proofs
+        verified_offers.append(verified)
+    message = value.get('message', '')
+    try:
+        text(message, 1000)
+        if message and (value['channel_type'] != 'expert' or value['relevance'] != 'matched' or not proofs):
+            raise ValueError('Сообщение допустимо только для подходящего эксперта с доказательствами')
+        if any('(' not in claim and claim.casefold() in message.casefold() for claim in PLAYBOOK['forbidden_claims']):
+            raise ValueError('Сообщение AI содержит запрещённое утверждение')
+    except ValueError as exc:
+        warnings.append(f'Черновик отброшен: {exc}')
+        message = ''
+    if warnings:
+        # Do not keep an outreach draft potentially based on a rejected offer.
+        if message:
+            warnings.append('Черновик скрыт из-за неподтверждённых деталей оффера')
+        message = ''
     # Do not retain arbitrary fields returned by an untrusted model.
-    result = {k: copy.deepcopy(value[k]) for k in ('channel_id', 'input_hash', 'channel_type', 'relevance', 'reason', 'message')}
+    result = {k: copy.deepcopy(value[k]) for k in ('channel_id', 'input_hash', 'channel_type', 'relevance', 'reason')}
     def normalized_proof(item):
         return canonical[id(item)]
     result['evidence'] = [normalized_proof(item) for item in evidence]
-    result['offers'] = [{**normalized_proof(item), 'kind': item['kind'], 'ownership': item['ownership'],
-                         'prices': offer_values[(id(item), 'prices')],
-                         'booking_methods': offer_values[(id(item), 'booking_methods')]} for item in offers]
+    result.update(offers=verified_offers, message=message, validation_warnings=list(dict.fromkeys(warnings)))
     return result
 
 
@@ -275,6 +333,12 @@ class ProxyAuditor:
         with self.repo.connect() as db:
             return db.execute('SELECT count(*) FROM api_ai_attempts WHERE run_id=?', (run_id,)).fetchone()[0]
 
+    def has_cache(self, row, topic, profile):
+        key = cache_key(request_data(row, self.settings, topic, profile), self.settings)
+        with self.repo.connect() as db:
+            hit = db.execute('SELECT created_at FROM api_ai_cache WHERE cache_key=?', (key,)).fetchone()
+        return bool(hit and 0 <= time.time() - hit['created_at'] <= CACHE_SECONDS)
+
     def _reserve(self, run_id, key):
         now = time.time()
         with self.repo.connect() as db:
@@ -342,12 +406,23 @@ class ProxyAuditor:
                  f"текст {prompt_bytes} байт; источников {len(data['sources'])}; streaming включён")
         if any(s.get('truncated') for s in data['sources']):
             self.log(f"AI {row['username']}: длинные тексты сокращены до дословных начальных фрагментов; полные тексты сохранены локально")
-        status, detail = 'error', 'Некорректный ответ AI'
+        status, detail, response_saved = 'error', 'Некорректный ответ AI', False
         try:
             reply = chat_completion(settings.ai_base_url, self.api_key, settings.ai_model, prompt,
                                     self.stop, timeout, lambda message: self.log(f"AI {row['username']}: {message}"))
             self.log(f"AI {row['username']}: ответ получен за {reply.elapsed_seconds:.1f} с; "
                      f"ID ответа: {reply.request_id or 'не указан'}; проверяю JSON и цитаты")
+            metadata = dict(model=settings.ai_model, prompt_version=PROMPT_VERSION,
+                            requested_model=settings.ai_model, response_model=reply.response_model, actual_model=None,
+                            proxy_version=(self.proxy_info or {}).get('version', ''), request_id=reply.request_id,
+                            usage=reply.usage or {}, elapsed_seconds=reply.elapsed_seconds,
+                            first_event_seconds=reply.first_event_seconds, prompt_bytes=prompt_bytes,
+                            sources_truncated=any(s.get('truncated') for s in data['sources']))
+            try:
+                save_response(self.repo, attempt_id, run_id, row['username'], key, data, reply.content, metadata)
+                response_saved = True
+            except (sqlite3.Error, OSError):
+                self.log(f"AI {row['username']}: не удалось сохранить диагностическую копию ответа")
             content = reply.content.strip()
             if content.startswith('```') and content.endswith('```'):
                 content = content.split('\n', 1)[1].rsplit('```', 1)[0].strip()
@@ -358,16 +433,11 @@ class ProxyAuditor:
             except ValueError as exc:
                 detail = str(exc)  # Only constant messages from our validator, never model text.
                 raise
-            review.update(cache_key=key, created_at=time.time(), model=settings.ai_model, prompt_version=PROMPT_VERSION,
-                          requested_model=settings.ai_model, response_model=reply.response_model, actual_model=None,
-                          proxy_version=(self.proxy_info or {}).get('version', ''), request_id=reply.request_id,
-                          usage=reply.usage or {}, elapsed_seconds=reply.elapsed_seconds,
-                          first_event_seconds=reply.first_event_seconds, prompt_bytes=prompt_bytes,
-                          sources_truncated=any(s.get('truncated') for s in data['sources']))
+            review.update(cache_key=key, created_at=time.time(), **metadata)
             with self.repo.connect() as db:
                 db.execute('INSERT OR REPLACE INTO api_ai_cache VALUES(?,?,?)', (key, review['created_at'], dumps(review)))
             row.update(api_ai_review=review)
-            status, detail = 'success', ''
+            status, detail = 'success', '; '.join(review.get('validation_warnings', []))[:1800]
         except ProxyError as exc:
             self.disabled = self.disabled or exc.disable
             status, detail = exc.status, exc.detail
@@ -375,6 +445,11 @@ class ProxyAuditor:
             # Validation errors deliberately do not include untrusted response text.
             pass
         finally:
+            if response_saved:
+                try:
+                    set_result(self.repo, attempt_id, detail)
+                except (sqlite3.Error, OSError):
+                    self.log(f"AI {row['username']}: не удалось обновить диагностический результат проверки")
             with self.repo.connect() as db:
                 db.execute('UPDATE api_ai_attempts SET status=?,detail=? WHERE id=?', (status, detail, attempt_id))
         self.log(f"AI {row['username']}: {STATUS_LABELS[status]}" + (f'; {detail}' if detail else ''))

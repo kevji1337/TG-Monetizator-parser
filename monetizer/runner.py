@@ -237,7 +237,7 @@ class JobRunner:
                 queue.append(row['username'])
         self.state['ai_queue'] = queue
 
-    def start(self, settings=None, queries=None, niche="", usernames=None, resume=False, api_key=None, ai_only=False):
+    def start(self, settings=None, queries=None, niche="", usernames=None, resume=False, api_key=None, ai_only=False, new_ai_round=False):
         with self.lock:
             if self.state["status"] in ("running", "stopping") or (self.thread and self.thread.is_alive()):
                 raise RuntimeError("Задача уже выполняется")
@@ -245,6 +245,8 @@ class JobRunner:
                 if not self.state.get("settings"):
                     raise ValueError("Нет сохранённого запуска")
                 settings = settings or Settings.from_saved(self.state["settings"])
+                if self.state.get('run_kind') == 'ai_round':
+                    ai_only = True
             else:
                 settings = settings or Settings()
                 if settings.search_mode == 'categories' and not usernames:
@@ -257,6 +259,10 @@ class JobRunner:
                     raise ValueError("Выберите тематики TGStat или добавьте каналы")
                 if len(queries) > 50:
                     raise ValueError("Допустимо не более 50 запросов")
+            if new_ai_round and not (resume and ai_only):
+                raise ValueError('Новый AI-разбор создаётся только по сохранённым каналам, без поиска')
+            if new_ai_round and not self.state.get('rows'):
+                raise ValueError('Нет сохранённых публикаций для нового AI-разбора')
             runtime_key = (api_key or os.environ.get('MONETIZER_AI_KEY', '')).strip()
             if ai_only and (not resume or not settings.ai_enabled):
                 raise ValueError('Для отдельного AI-разбора откройте сохранённый запуск и включите AI')
@@ -274,6 +280,12 @@ class JobRunner:
                               "error": "", "search_complete": bool(usernames), "candidates": {u: ["Введён вручную"] for u in usernames},
                               "queue": list(usernames), "query_state": {}, "query_stats": {}, "elapsed_seconds": 0,
                               "started_at": datetime.now(timezone.utc).isoformat()}
+            if new_ai_round:
+                self.state = copy.deepcopy(self.state)
+                self.state.update(parent_run_id=self.state['run_id'], run_id=uuid4().hex, run_kind='ai_round',
+                                  started_at=datetime.now(timezone.utc).isoformat(), elapsed_seconds=0,
+                                  logs=[], paths=[], queries=[], query_stats={}, query_state={}, search_complete=True,
+                                  ai_paused=False, ai_stage='Новый AI-разбор сохранённых постов')
             self.state["settings"] = settings.to_dict()
             self.state['ai_only'] = bool(ai_only)
             self._mark_pending(settings)
@@ -468,6 +480,13 @@ class JobRunner:
                     waiting = [r for r in self.state['rows'] if r['username'] in backlog and r['username'] not in ai_tried]
                 # One independent worker handles AI; public fetching never waits for
                 # its HTTP response. The proxy itself enforces the durable POST cap.
+                if settings.ai_enabled and self._api_auditor and ai_pending is None and waiting:
+                    if self._api_auditor.disabled or self._api_auditor.used(self.state['run_id']) >= settings.ai_max_audits:
+                        profile = load_profile(self.repo)
+                        for row in waiting:
+                            if not self._api_auditor.has_cache(row, self.state.get('niche', ''), profile):
+                                ai_tried.add(row['username'])
+                        waiting = [row for row in waiting if row['username'] not in ai_tried]
                 if settings.ai_enabled and self._api_auditor and ai_pending is None and waiting:
                     row = min(waiting, key=lambda r: (r.get('ai_audit_status') == 'error', r.get('local_status') not in ('top', 'recommended'), r['username']))
                     ai_username = row['username']

@@ -281,10 +281,19 @@ def results_panel():
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(str(exc))
     if not running and ai_waiting:
+        st.caption('Продолжение использует остаток лимита текущего запуска. Новый AI-разбор создаёт отдельный запуск '
+                   'с сохранёнными постами и новым лимитом до пяти запросов; TGStat и Telegram повторно не загружаются.')
         if st.button('Разобрать только очередь AI — без TGStat', disabled=not ai_enabled or state.get('external_owner', False)):
             try:
                 queue_config = {**state['settings'], **ai_config, 'ai_enabled': True, 'max_minutes': time_limit}
                 runner.start(Settings.from_saved(queue_config), resume=True, api_key=ai_key, ai_only=True)
+                st.rerun()
+            except (ValueError, RuntimeError, OSError) as exc:
+                st.error(str(exc))
+        if st.button('Новый AI-разбор сохранённых каналов — до 5 запросов', disabled=not ai_enabled or state.get('external_owner', False)):
+            try:
+                queue_config = {**state['settings'], **ai_config, 'ai_enabled': True, 'max_minutes': time_limit}
+                runner.start(Settings.from_saved(queue_config), resume=True, api_key=ai_key, ai_only=True, new_ai_round=True)
                 st.rerun()
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(str(exc))
@@ -346,7 +355,7 @@ def results_panel():
                 st.rerun()
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(str(exc))
-        show_evidence(row)
+        show_evidence(row, runner.repo)
         if row.get('api_ai_review', {}).get('message'):
             if st.button('Принять черновик Gemini как сохранённое сообщение', disabled=running):
                 review = row['api_ai_review']
