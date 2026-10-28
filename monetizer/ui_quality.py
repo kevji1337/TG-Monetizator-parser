@@ -3,6 +3,8 @@ import json
 import sqlite3
 import streamlit as st
 
+from .ui_tables import data_table
+
 from .profile import load_profile, save_profile, FIELDS
 from .evaluation import review_set, validate_labels, save_labels, evaluate
 from .qualification import TYPE_LABELS
@@ -44,7 +46,7 @@ def quality_panel(repo, running):
     else:
         st.json({k: v for k, v in report.items() if k != 'errors'})
         if report['errors']:
-            st.dataframe(pd.DataFrame(report['errors']), hide_index=True, width='stretch')
+            data_table(pd.DataFrame(report['errors']), hide_index=True, width='stretch')
     if packet['channels']:
         channels = {c['channel_id']: c for c in packet['channels']}
         chosen = st.selectbox('Канал для ручной оценки', list(channels))

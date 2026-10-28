@@ -69,6 +69,7 @@ def table_options(repo, ui, visible, defaults, mode, columns):
         name = st.text_input('Название вида', key='view_name', max_chars=120)
         if st.button('Сохранить вид таблицы', disabled=not name.strip()):
             keys = [widget_key('radio', 'Вид таблицы'), 'table_columns_' + mode]
+            keys.append(widget_key('number_input', 'Лимит ширины текстовых столбцов, px'))
             keys += [widget_key(kind, label) for kind, label in [('checkbox', 'Только зелёные'), ('checkbox', 'С кандидатом контакта'),
                      ('checkbox', 'Карточка рядом с таблицей'),
                      ('text_input', 'Поиск в результатах'), ('multiselect', 'Отбор по главной причине'),

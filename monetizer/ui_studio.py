@@ -6,6 +6,8 @@ from datetime import date
 
 import streamlit as st
 
+from .ui_tables import data_table
+
 from .audit import normalize_username
 from .categories import load_categories, category_label
 from .preferences import widget_key, last_run_preferences
@@ -59,7 +61,7 @@ def search_tools(runner, busy):
     st.info(estimate['text'] + (f" · примерно {estimate['minutes']} мин." if estimate['minutes'] is not None else ''))
     plan = dict(state.get('settings', {}).get('category_weights', ()))
     st.write('**План текущих категорий**')
-    st.dataframe(pd.DataFrame([{'Категория': category_label(q), 'Вес': plan.get(q.split(':')[-1], 1),
+    data_table(pd.DataFrame([{'Категория': category_label(q), 'Вес': plan.get(q.split(':')[-1], 1),
                                'Найдено': stats.get('found', 0), 'Проверено': stats.get('audited', 0),
                                'Подходит': stats.get('qualified', 0)} for q, stats in state.get('query_stats', {}).items()]), hide_index=True)
     failures = [r['username'] for r in state.get('rows', []) if r.get('metric_status', r.get('status')) == 'error']
@@ -210,7 +212,7 @@ def tag_tools(runner, busy):
     rows = [r for r in runner.repo.list_channels() if
             (not chosen_tags or set(chosen_tags) <= set(attrs.get(normalize_username(r['username']), {}).get('tags', []))) and
             (not chosen_collections or set(chosen_collections) & set(attrs.get(normalize_username(r['username']), {}).get('collections', [])))]
-    st.dataframe(pd.DataFrame([{'Канал': r['username'], 'Название': r.get('title'),
+    data_table(pd.DataFrame([{'Канал': r['username'], 'Название': r.get('title'),
                                'Теги': ', '.join(attrs.get(normalize_username(r['username']), {}).get('tags', [])),
                                'Подборки': ', '.join(attrs.get(normalize_username(r['username']), {}).get('collections', []))} for r in rows]), hide_index=True)
     if rows:
@@ -249,7 +251,7 @@ def business_analytics(runner, busy):
         group['Прогноз выручки'] += values['gross_forecast']
         group['Прогноз вашей доли минус расходы'] += values['partner_forecast']
         group['Фактическая выручка, введено'] += values['actual_revenue']
-    st.dataframe(pd.DataFrame(totals.values()), hide_index=True)
+    data_table(pd.DataFrame(totals.values()), hide_index=True)
     st.caption('Валюты не суммируются между собой. Прогноз и вручную введённая выручка показаны отдельно.')
     rows = runner.repo.list_channels()
     planned = [r for r in rows if r.get('next_contact_date')]

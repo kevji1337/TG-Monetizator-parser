@@ -4,6 +4,8 @@ import re
 
 import streamlit as st
 
+from .ui_tables import data_table
+
 from .candidate_insights import ai_priority, relevant_offers, OFFER_LABELS
 from .contact_plans import ACTIONS
 from .qualification import TYPE_LABELS
@@ -136,7 +138,7 @@ def contact_plan_panel(runner, running):
     if not selected:
         st.info('В этом списке пока нет действий. Дату можно назначить в карточке канала в поиске или базе кандидатов.')
         return
-    st.dataframe(pd.DataFrame([{'Срок': row.get('contact_plan_state'), 'Дата': row.get('next_contact_date'),
+    data_table(pd.DataFrame([{'Срок': row.get('contact_plan_state'), 'Дата': row.get('next_contact_date'),
                                 'Действие': row.get('next_action_label'), 'Канал': row['username'],
                                 'Название': row.get('title'), 'Рабочий статус': row.get('work_status_label'),
                                 'Пояснение': row.get('contact_plan_note')} for row in selected]), hide_index=True, width='stretch',

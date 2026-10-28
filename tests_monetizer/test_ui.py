@@ -171,6 +171,9 @@ class InterfaceTests(unittest.TestCase):
             self.assertEqual(next(m for m in app.multiselect if m.label == 'Тематики TGStat').value, ['34'])
             for kind in ('checkbox', 'number_input', 'multiselect', 'text_input', 'text_area', 'slider', 'selectbox'):
                 for widget in getattr(app.sidebar, kind):
+                    if widget.label == 'Лимит ширины текстовых столбцов, px':
+                        self.assertFalse(widget.disabled)
+                        continue
                     self.assertTrue(widget.disabled, widget.label)
             self.assertTrue(next(b for b in app.button if b.label == 'Начать поиск и аудит').disabled)
             self.assertFalse(next(b for b in app.sidebar.button if b.label == 'На главную — поиск').disabled)
@@ -194,13 +197,34 @@ class InterfaceTests(unittest.TestCase):
             return next(t for t in app.dataframe if COLUMNS['activity_ratio'] in t.value.columns)
         self.assertEqual(len(app.exception), 0)
         config = json.loads(table().proto.columns)
-        self.assertEqual(config[COLUMNS['ai_priority_score']]['width'], 90)
+        self.assertLessEqual(config[COLUMNS['ai_priority_score']]['width'], 128)
+        self.assertGreaterEqual(config[COLUMNS['ai_priority_score']]['width'], 64)
         self.assertEqual(config[COLUMNS['ai_priority_score']]['label'], 'Приоритет')
         self.assertEqual(config[COLUMNS['activity_ratio']]['type_config']['format'], '%.1f%%')
         self.assertNotIn(COLUMNS['median_views'], table().proto.column_order)
         next(r for r in app.radio if r.label == 'Вид таблицы').set_value('Подробный').run()
         self.assertIn(COLUMNS['median_views'], table().proto.column_order)
         self.assertEqual(len(app.exception), 0)
+
+    def test_table_width_limit_applies_and_survives_new_session(self):
+        from monetizer.preferences import Preferences
+        from monetizer.ui_tables import WIDTH_LABEL, WIDTH_KEY
+        self._seed_database()
+        title = 'Практикующий дизайнер интерфейсов ' * 20
+        self.runner.state['rows'][0]['title'] = title
+        app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+        self.assertFalse(next(e for e in app.sidebar.expander if e.label == 'Вид таблиц').proto.expanded)
+        next(n for n in app.number_input if n.label == WIDTH_LABEL).set_value(200).run()
+        table = next(t for t in app.dataframe if COLUMNS['title'] in t.value.columns)
+        self.assertEqual(json.loads(table.proto.columns)[COLUMNS['title']]['width'], 200)
+        self.assertEqual(table.value[COLUMNS['title']].iloc[0], title)
+        self.assertEqual(Preferences(self.runner.repo).values[WIDTH_KEY], 200)
+        fresh = AppTest.from_file(str(self.app_path)).run(timeout=15)
+        self.assertEqual(next(n for n in fresh.number_input if n.label == WIDTH_LABEL).value, 200)
+        fresh_table = next(t for t in fresh.dataframe if COLUMNS['title'] in t.value.columns)
+        self.assertEqual(json.loads(fresh_table.proto.columns)[COLUMNS['title']]['width'], 200)
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(fresh.exception), 0)
 
     def test_invalid_search_bounds_disable_start_until_corrected(self):
         with patch.object(self.runner, 'start') as start:

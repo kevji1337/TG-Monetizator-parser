@@ -3,6 +3,8 @@ import json
 
 import streamlit as st
 
+from .ui_tables import data_table
+
 from .batch import create_batch, batch_zip, batch_prompt, preview_response, import_response
 from .export import csv_bytes, xlsx_bytes
 from .repository import WORK_STATUSES
@@ -116,7 +118,7 @@ def database_panel(runner, running):
     visible = [r for r in rows if (not status_filter or r["work_status"] in status_filter)
                and (not hide_non_target or (r.get('channel_type') or 'unknown') in ('expert', 'unknown'))
                and (not search or search.casefold() in (r.get("title", "") + r["username"]).casefold())]
-    st.dataframe(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"),
+    data_table(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"),
                                "Отбор": '⏳ Оценка устарела' if assessment_stale(r) else r.get("verdict"),
                                "Тип": TYPE_LABELS.get(r.get('channel_type'), 'Не установлено'),
                                "Работа": WORK_STATUSES[r["work_status"]], "Следующий контакт": r.get('next_contact_date', ''),
@@ -174,7 +176,7 @@ def history_panel(runner, running):
     run_id = st.selectbox("Предыдущий запуск", list(labels), format_func=labels.get)
     state = runner.repo.load_run(run_id)
     st.caption(f"Каналов: {len(state['rows'])}; причина завершения: {state.get('stop_reason', state.get('stage', ''))}")
-    st.dataframe(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"), "Вердикт": r.get("verdict")} for r in state["rows"]]), hide_index=True, width="stretch",
+    data_table(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"), "Вердикт": r.get("verdict")} for r in state["rows"]]), hide_index=True, width="stretch",
                  column_config=workspace_columns(), row_height=38)
     c1, c2 = st.columns(2)
     c1.download_button("CSV предыдущего запуска", csv_bytes(state["rows"]), f"history_{run_id}.csv", mime="text/csv")
@@ -208,7 +210,7 @@ def batch_panel(runner, running):
         try:
             preview = preview_response(runner.repo, payload)
             st.caption(f"Предварительный просмотр: {len(preview['reviews'])} каналов. Тексты и рабочие статусы не заменяются автоматически.")
-            st.dataframe(pd.DataFrame([{"Канал": r["channel_id"], "Тип": r["channel_type"], "Тематика": r["relevance"],
+            data_table(pd.DataFrame([{"Канал": r["channel_id"], "Тип": r["channel_type"], "Тематика": r["relevance"],
                                        "Сообщение": r["message"]} for r in preview["reviews"]]), hide_index=True, width="stretch")
             if st.button("Импортировать проверенный ответ", disabled=running):
                 result = import_response(runner.repo, payload)

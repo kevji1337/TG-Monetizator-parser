@@ -38,7 +38,7 @@ from monetizer.tgstat_profiles import TGStatProfiles
 from monetizer.runtime import acquire_runner
 from monetizer.ui_navigation import sidebar_navigation
 from monetizer.ui_style import apply_style
-from monetizer.ui_tables import COMPACT_COLUMNS, candidate_columns, workspace_columns, search_locked
+from monetizer.ui_tables import COMPACT_COLUMNS, candidate_columns, workspace_columns, search_locked, data_table, WIDTH_LABEL
 from monetizer.live_reload import ui_api
 from monetizer.ui_power import apply_pending, preset_panel, table_options, candidate_selector, toggle_table_view, reminder_badge
 from monetizer.workspace import Workspace, search_eta, DEAL_STAGES
@@ -80,6 +80,10 @@ search_ui = PersistentUI(preferences, disabled=search_busy)
 section = sidebar_navigation(ui)
 preset_panel(runner.repo, preferences, search_busy)
 reminder_badge(runner.repo, preferences)
+with st.sidebar.expander('Вид таблиц', expanded=False):
+    ui.number_input(WIDTH_LABEL, 120, 600, 320, step=20,
+                    help='Столбцы подбираются по заголовку и содержимому до этого предела. Числовые столбцы — до 160 px, приоритет — до 128 px.')
+    st.caption('Длинный текст сохраняется полностью; ограничивается только ширина отображения. Настройку можно менять во время поиска.')
 st.title("Монетизатор трафика")
 st.caption("Поиск публичных Telegram-каналов экспертов · аудит просмотров · черновики предложений")
 
@@ -404,12 +408,12 @@ def results_panel():
     if state.get("query_stats"):
         import pandas as pd
         with st.expander("Эффективность тематик / прежних запросов"):
-            st.dataframe(pd.DataFrame([{"Тематика / запрос": category_label(q), **stats} for q, stats in state["query_stats"].items()]),
+            data_table(pd.DataFrame([{"Тематика / запрос": category_label(q), **stats} for q, stats in state["query_stats"].items()]),
                          hide_index=True, width="stretch")
             history = runner.repo.query_history(state.get("query_scope", ""), state.get("run_id"))
             if history:
                 st.caption("Предыдущие запуски с теми же направлением, фильтрами и версией правил")
-                st.dataframe(pd.DataFrame([{"Тематика / запрос": category_label(q), **stats} for q, stats in history.items()]), hide_index=True, width="stretch")
+                data_table(pd.DataFrame([{"Тематика / запрос": category_label(q), **stats} for q, stats in history.items()]), hide_index=True, width="stretch")
     if not rows:
         st.info("Результаты появятся по мере аудита. Можно также проверить свой список публичных каналов.")
         return
@@ -417,17 +421,17 @@ def results_panel():
     with st.expander('Сводка отбора и причины'):
         st.caption(f'Проверено Telegram-каналов: {len(rows)}. Каждый канал учитывается ровно в одной главной причине; '
                    'непроверенные находки TGStat сюда не входят. «Проверено AI» означает корректный ответ, а не прохождение отбора.')
-        st.dataframe(pd.DataFrame(selection_summary(rows)), hide_index=True, width='stretch')
+        data_table(pd.DataFrame(selection_summary(rows)), hide_index=True, width='stretch')
         types = Counter(TYPE_LABELS.get(row.get('channel_type'), 'Не установлено') for row in rows)
         st.caption('Типы всех проверенных каналов, включая те, которые также не прошли метрики:')
-        st.dataframe(pd.DataFrame([{'Тип канала': kind, 'Каналов': value} for kind, value in types.most_common()]),
+        data_table(pd.DataFrame([{'Тип канала': kind, 'Каналов': value} for kind, value in types.most_common()]),
                      hide_index=True, width='stretch')
     if has_ai:
         with st.expander('Очередь AI по приоритету'):
             waiting_rows = sorted([row for row in rows if row.get('ai_queued')], key=priority_key)
             st.caption('Сначала личная практика и соответствие теме. Балл управляет порядком проверки, не зелёной меткой. '
                        'Первые кандидаты выбираются после небольшой начальной выборки: до 12 публичных аудитов или 8 кандидатов.')
-            st.dataframe(pd.DataFrame([{'Канал': row['username'], 'Название': row.get('title'),
+            data_table(pd.DataFrame([{'Канал': row['username'], 'Название': row.get('title'),
                                         'Приоритет': ai_priority(row)['ai_priority_score'],
                                         'Почему': ai_priority(row)['ai_priority_reason']} for row in waiting_rows[:15]],
                                       columns=['Канал', 'Название', 'Приоритет', 'Почему']), hide_index=True, width='stretch',
@@ -476,7 +480,7 @@ def results_panel():
     else:
         table_area, detail_area = st.container(), st.container()
     with table_area:
-        st.dataframe(frame, hide_index=True, width="stretch", height=min(570, max(150, 42 + len(frame) * 38)), row_height=38,
+        data_table(frame, hide_index=True, width="stretch", height=min(570, max(150, 42 + len(frame) * 38)), row_height=38,
                      column_order=table_columns,
                      column_config=candidate_columns(state.get('settings', {}).get('target_post_age_hours', 24)))
         if selected:
