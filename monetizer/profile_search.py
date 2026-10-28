@@ -10,11 +10,29 @@ from .tgstat_profiles import TGStatProfiles
 def profile_plan(repo, settings):
     profiles = TGStatProfiles(repo).list()
     names = {item['id']: item['name'] for item in profiles}
+    if not names:
+        raise ValueError('Добавьте или восстановите профиль в разделе «Профили TGStat»')
     first = settings.tgstat_profile_id
     if first not in names:
         raise ValueError('Выбранный профиль TGStat не найден')
     return {'order': [first] + [item['id'] for item in profiles if item['id'] != first],
             'names': names, 'active': first, 'skipped': {}, 'exhausted': False}
+
+
+def reconcile_profiles(repo, plan):
+    """Deleted profiles must never reappear through a historical checkpoint."""
+    current = {item['id']: item['name'] for item in TGStatProfiles(repo).list()}
+    if not current:
+        raise ValueError('Нет активных профилей TGStat. Добавьте или восстановите профиль перед продолжением.')
+    plan = copy.deepcopy(plan)
+    plan['order'] = [item for item in plan['order'] if item in current]
+    if not plan['order']:
+        raise ValueError('Все профили этого запуска удалены. Восстановите нужный профиль или начните новый поиск.')
+    plan['names'].update(current)
+    if plan['active'] not in plan['order']:
+        plan['active'] = next((item for item in plan['order'] if item not in plan['skipped']), plan['order'][0])
+    plan['exhausted'] = all(item in plan['skipped'] for item in plan['order'])
+    return plan
 
 
 class ProfileSearch:

@@ -19,7 +19,7 @@ from .qualification import qualify, RULE_VERSION, TYPE_LABELS
 from .repository import Repository, dumps, content_hash
 from .profile import load_profile, profile_version
 from .search import TGStatSearch, SearchBudgetExceeded
-from .profile_search import ProfileSearch, profile_plan
+from .profile_search import ProfileSearch, profile_plan, reconcile_profiles
 from .settings import Settings
 from .categories import category_key, category_label, category_id_from_key, CATEGORY_RULES_VERSION
 from .tgstat_filters import filter_spec
@@ -308,8 +308,19 @@ class JobRunner:
             plan = (copy.deepcopy(self.state.get('tgstat_profiles')) if resume else None) if uses_tgstat else None
             if uses_tgstat and plan is None:
                 plan = profile_plan(self.repo, settings)
+            previous_profile = plan['active'] if plan else None
+            if uses_tgstat:
+                plan = reconcile_profiles(self.repo, plan)
             guard = RunGuard(self.repo.path)
             guard.__enter__()
+            try:
+                if uses_tgstat:
+                    # Profile deletion uses the same lock: validate again after
+                    # acquiring it so a concurrent UI cannot leave a stale plan.
+                    plan = reconcile_profiles(self.repo, plan) if resume else profile_plan(self.repo, settings)
+            except Exception:
+                guard.__exit__()
+                raise
             if not resume:
                 scope_data = {k: v for k, v in settings.to_dict().items() if k not in (
                     "target_count", "max_audits", "max_minutes", "new_only", "workers", "requests_per_second", "login_wait_seconds", "retries", "connect_timeout", "read_timeout",
@@ -329,6 +340,9 @@ class JobRunner:
             self.state["settings"] = settings.to_dict()
             if uses_tgstat:
                 self.state['tgstat_profiles'] = plan
+                if previous_profile != plan['active']:
+                    for cursor in self.state.get('query_state', {}).values():
+                        cursor.update(page=0, exhausted=False, blocked=False)
             self.state['ai_only'] = bool(ai_only)
             self._mark_pending(settings)
             self._api_auditor = ProxyAuditor(self.repo, settings, runtime_key, self.stop_event, self.log) if settings.ai_enabled else None

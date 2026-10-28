@@ -11,7 +11,7 @@ from .audit import normalize_username
 from .ai_responses import SCHEMA as AI_RESPONSE_SCHEMA
 from .contact_plans import SCHEMA as CONTACT_SCHEMA, ACTIONS, validate_plan, plan_state
 from .candidate_insights import ai_priority, selection_bucket, BUCKETS
-from .tgstat_profiles import SCHEMA as TGSTAT_PROFILES_SCHEMA
+from .tgstat_profiles import SCHEMA as TGSTAT_PROFILES_SCHEMA, ARCHIVE_SCHEMA as TGSTAT_ARCHIVE_SCHEMA
 
 WORK_STATUSES = {"new": "Не разобран", "qualified": "Подходит", "unsuitable": "Не подходит",
                  "contacted": "Написал", "replied": "Ответил", "declined": "Отказ"}
@@ -57,6 +57,7 @@ class Repository:
             db.execute(AI_RESPONSE_SCHEMA)
             db.execute(CONTACT_SCHEMA)
             db.execute(TGSTAT_PROFILES_SCHEMA)
+            db.execute(TGSTAT_ARCHIVE_SCHEMA)
 
     @contextmanager
     def connect(self):

@@ -27,7 +27,7 @@ from monetizer.profile import profile_version
 from monetizer.diagnostics import logger
 from monetizer.preferences import Preferences, PersistentUI, api_key_field, last_run_preferences
 from monetizer.candidate_insights import selection_summary, selection_bucket, ai_priority, priority_key, BUCKETS
-from monetizer.ui_tgstat_profiles import profile_picker
+from monetizer.ui_tgstat_profiles import profile_picker, profile_manager
 from monetizer.tgstat_profiles import TGStatProfiles
 
 PAGE_STARTED = time.perf_counter()
@@ -51,7 +51,7 @@ ui = PersistentUI(preferences)
 sender_profile = profile_panel(runner.repo)
 st.title("Монетизатор трафика")
 st.caption("Поиск публичных Telegram-каналов экспертов · аудит просмотров · черновики предложений")
-section = ui.radio('Раздел', ['Поиск', 'База кандидатов', 'План контактов', 'История запусков', 'Пакет ChatGPT', 'Качество отбора', 'Dev-диагностика'],
+section = ui.radio('Раздел', ['Поиск', 'База кандидатов', 'План контактов', 'История запусков', 'Пакет ChatGPT', 'Качество отбора', 'Профили TGStat', 'Dev-диагностика'],
                    horizontal=True)
 
 with st.sidebar:
@@ -177,7 +177,8 @@ with st.sidebar:
         rate = ui.slider("Запросов к Telegram в секунду", .5, 5.0, 2.0, step=.5)
         audit_budget = ui.number_input("Максимум аудитов: 0 = десять целей", 0, 10000, 0, step=10)
         time_limit = ui.number_input("Лимит времени, минут", 1.0, 1440.0, 60.0)
-    if st.button("Начать поиск и аудит" if mode.startswith("TGStat") else "Начать аудит", type="primary", width="stretch"):
+    if st.button("Начать поиск и аудит" if mode.startswith("TGStat") else "Начать аудит", type="primary", width="stretch",
+                 disabled=mode.startswith('TGStat') and not TGStatProfiles(runner.repo).list()):
         try:
             settings = Settings(min_subs=min_subs, max_subs=max_subs, min_daily_reach=daily,
                                 min_avg_views=views, target_count=count, mature_hours=mature,
@@ -521,6 +522,8 @@ def results_panel():
 
 if section == 'Поиск':
     results_panel()
+elif section == 'Профили TGStat':
+    profile_manager(runner, ui)
 elif section == 'Dev-диагностика':
     from monetizer.ui_diagnostics import diagnostics_panel
     diagnostics_panel(runner)

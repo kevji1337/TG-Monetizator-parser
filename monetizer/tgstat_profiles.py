@@ -12,6 +12,8 @@ DEFAULT_NAME = 'Основной (прежний вход)'
 ROOT = Path(__file__).resolve().parents[1] / 'results' / 'monetizer'
 SCHEMA = '''CREATE TABLE IF NOT EXISTS tgstat_profiles(
     id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)'''
+ARCHIVE_SCHEMA = '''CREATE TABLE IF NOT EXISTS tgstat_profile_archives(
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL, created_at TEXT NOT NULL, deleted_at TEXT NOT NULL)'''
 AUTH_LABELS = {'authenticated': 'Вход виден на странице TGStat', 'not_authenticated': 'Требуется вход',
                'unknown': 'Вход не подтверждён', 'not_checked': 'Вход ещё не проверен'}
 
@@ -67,10 +69,18 @@ class TGStatProfiles:
         with self.repo.connect() as db:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tgstat_profiles'").fetchone()
             rows = [dict(row) for row in db.execute('SELECT id,name,created_at FROM tgstat_profiles ORDER BY created_at,id')] if exists else []
-        return [{'id': DEFAULT_PROFILE, 'name': DEFAULT_NAME, 'created_at': ''}] + rows
+            archived_exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tgstat_profile_archives'").fetchone()
+            default_deleted = archived_exists and db.execute('SELECT 1 FROM tgstat_profile_archives WHERE id=?', (DEFAULT_PROFILE,)).fetchone()
+        return ([] if default_deleted else [{'id': DEFAULT_PROFILE, 'name': DEFAULT_NAME, 'created_at': ''}]) + rows
+
+    def archived(self):
+        with self.repo.connect() as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tgstat_profile_archives'").fetchone()
+            return [dict(row) for row in db.execute('SELECT * FROM tgstat_profile_archives ORDER BY deleted_at DESC,id')] if exists else []
 
     def name(self, profile_id):
-        return next((row['name'] for row in self.list() if row['id'] == profile_id), 'Профиль отсутствует')
+        current = next((row['name'] for row in self.list() if row['id'] == profile_id), None)
+        return current or next((row['name'] + ' (удалён)' for row in self.archived() if row['id'] == profile_id), 'Профиль отсутствует')
 
     def add(self, name):
         name = validate_name(name)
@@ -79,13 +89,70 @@ class TGStatProfiles:
             with self.repo.connect() as db:
                 db.execute(SCHEMA)
                 db.execute('BEGIN IMMEDIATE')
-                if db.execute('SELECT count(*) FROM tgstat_profiles').fetchone()[0] >= 19:
-                    raise ValueError('Можно сохранить до 20 профилей, включая основной')
+                db.execute(ARCHIVE_SCHEMA)
+                default_active = not db.execute('SELECT 1 FROM tgstat_profile_archives WHERE id=?', (DEFAULT_PROFILE,)).fetchone()
+                if db.execute('SELECT count(*) FROM tgstat_profiles').fetchone()[0] + int(default_active) >= 20:
+                    raise ValueError('Можно сохранить до 20 активных профилей')
                 db.execute('INSERT INTO tgstat_profiles(id,name,name_key,created_at) VALUES(?,?,?,?)',
                            (profile_id, name, name.casefold(), datetime.now(timezone.utc).isoformat()))
                 profile_directory(profile_id, create=True)
         except sqlite3.IntegrityError:
             raise ValueError('Профиль с таким названием уже существует') from None
+        return profile_id
+
+    def delete(self, profile_id):
+        """Remove from active use; keep native Chrome data for explicit recovery."""
+        from .runner import RunGuard
+        from .diagnostics import retained_sessions
+        from .browser_session import BrowserExit
+        validate_profile_id(profile_id)
+        with RunGuard(self.repo.path):
+            if any(item['profile_id'] == profile_id for item in retained_sessions(include_url=False)):
+                raise ValueError('Сначала закройте Chrome этого профиля кнопкой в панели')
+            saved = session_state(profile_id)
+            pid = saved.get('browser_pid')
+            if saved.get('close_status') == 'open' and type(pid) is int and pid > 0:
+                watcher = BrowserExit(pid)
+                try:
+                    if not watcher.wait(0):
+                        raise ValueError('Chrome этого профиля ещё работает. Закройте его перед удалением.')
+                finally:
+                    watcher.close()
+            with self.repo.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute(ARCHIVE_SCHEMA)
+                if db.execute('SELECT 1 FROM tgstat_profile_archives WHERE id=?', (profile_id,)).fetchone():
+                    raise ValueError('Профиль уже удалён')
+                if profile_id == DEFAULT_PROFILE:
+                    record = (DEFAULT_PROFILE, DEFAULT_NAME, DEFAULT_NAME.casefold(), '')
+                else:
+                    row = db.execute('SELECT id,name,name_key,created_at FROM tgstat_profiles WHERE id=?', (profile_id,)).fetchone()
+                    if row is None:
+                        raise ValueError('Профиль не найден')
+                    record = tuple(row)
+                db.execute('INSERT INTO tgstat_profile_archives VALUES(?,?,?,?,?)', (*record, datetime.now(timezone.utc).isoformat()))
+                db.execute('DELETE FROM tgstat_profiles WHERE id=?', (profile_id,))
+
+    def restore(self, profile_id):
+        from .runner import RunGuard
+        validate_profile_id(profile_id)
+        with RunGuard(self.repo.path):
+            try:
+                with self.repo.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    db.execute(ARCHIVE_SCHEMA)
+                    row = db.execute('SELECT id,name,name_key,created_at FROM tgstat_profile_archives WHERE id=?', (profile_id,)).fetchone()
+                    if row is None:
+                        raise ValueError('Удалённый профиль не найден')
+                    default_active = not db.execute('SELECT 1 FROM tgstat_profile_archives WHERE id=?', (DEFAULT_PROFILE,)).fetchone()
+                    if db.execute('SELECT count(*) FROM tgstat_profiles').fetchone()[0] + int(default_active) >= 20:
+                        raise ValueError('Достигнут лимит 20 активных профилей')
+                    if profile_id != DEFAULT_PROFILE:
+                        profile_directory(profile_id)
+                        db.execute('INSERT INTO tgstat_profiles VALUES(?,?,?,?)', tuple(row))
+                    db.execute('DELETE FROM tgstat_profile_archives WHERE id=?', (profile_id,))
+            except sqlite3.IntegrityError:
+                raise ValueError('Сначала переименуйте активный профиль с таким же названием') from None
         return profile_id
 
     def rename(self, profile_id, name):
@@ -102,8 +169,18 @@ class TGStatProfiles:
             raise ValueError('Профиль с таким названием уже существует') from None
 
 
-def open_for_login(profile_id, log=None):
+def open_for_login(profile_id, log=None, repo=None):
     """User-click action only: open one Chrome, perform no search or scraping."""
+    if repo is None:
+        return _open_for_login(profile_id, log)
+    from .runner import RunGuard
+    with RunGuard(repo.path):
+        if profile_id not in {row['id'] for row in TGStatProfiles(repo).list()}:
+            raise ValueError('Профиль удалён или отсутствует. Выберите активный профиль.')
+        return _open_for_login(profile_id, log)
+
+
+def _open_for_login(profile_id, log):
     from .search import TGStatSearch
     from .settings import Settings
     from .diagnostics import retain, logger
