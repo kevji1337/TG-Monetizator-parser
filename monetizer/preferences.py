@@ -122,7 +122,7 @@ def last_run_preferences(state):
         'min_ci': ('number_input', 'Индекс цитирования от'), 'max_ci': ('number_input', 'Индекс цитирования до'),
         'exclude_dead': ('checkbox', 'Скрыть мёртвые каналы'), 'exclude_scam': ('checkbox', 'Без SCAM/FAKE'),
         'exclude_red_label': ('checkbox', 'Без красной метки'),
-        'min_avg_views': ('number_input', 'Средние просмотры поста от'),
+        'min_avg_view_ratio': ('number_input', 'Средние просмотры от подписчиков, %'),
         'target_post_age_hours': ('number_input', 'Возраст поста для оценки активности, часов'),
         'post_age_tolerance_hours': ('number_input', 'Допустимое отклонение возраста, часов'),
         'min_post_view_ratio': ('number_input', 'Просмотры поста от подписчиков, %'),

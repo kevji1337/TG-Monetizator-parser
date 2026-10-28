@@ -11,7 +11,8 @@ class Settings:
     min_subs: int = 3000
     max_subs: int = 30000
     min_daily_reach: int = 300  # TGStat filter; not measured by t.me previews.
-    min_avg_views: int = 300
+    min_avg_views: int = 0  # Legacy absolute threshold, retained for saved runs.
+    min_avg_view_ratio: float | None = 10.0  # None preserves legacy absolute-only runs.
     target_count: int = 30
     posts_limit: int = 15
     min_posts: int = 5
@@ -66,6 +67,9 @@ class Settings:
     ai_prompt_bytes: int = 96000
 
     def __post_init__(self):
+        if (self.min_avg_view_ratio is not None and
+                (type(self.min_avg_view_ratio) not in (int, float) or not 0 <= self.min_avg_view_ratio <= 100)):
+            raise ValueError('Порог средних просмотров: от 0 до 100% подписчиков')
         if type(self.target_post_age_hours) is not int or not 1 <= self.target_post_age_hours <= 168:
             raise ValueError('Возраст поста для оценки активности: 1–168 часов')
         if type(self.post_age_tolerance_hours) is not int or not 0 <= self.post_age_tolerance_hours <= self.target_post_age_hours:
@@ -151,6 +155,8 @@ class Settings:
     def from_saved(cls, data):
         """Resume old searches with their original filters, not today's default preset."""
         data = dict(data)
+        if 'min_avg_view_ratio' not in data and 'min_avg_views' in data:
+            data['min_avg_view_ratio'] = None
         if 'min_age_months' not in data:
             data.update(min_age_months=0, min_err=0, language_ids=(), channel_type='public')
         return cls(**data)

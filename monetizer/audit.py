@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 
 from .settings import Settings
-from .view_metrics import assess_post_views
+from .view_metrics import assess_average_views, assess_post_views
 
 
 class Cancelled(Exception):
@@ -203,11 +203,9 @@ def parse_channel_html(html, username, settings=None, now=None):
         failures.append(f"Подписчики вне диапазона {settings.min_subs}–{settings.max_subs}")
     if days_since is not None and days_since > settings.abandoned_days:
         failures.append(f"Заброшен: более {settings.abandoned_days} дней без постов")
-    if len(observed_views) < settings.min_posts:
-        uncertain.append(f"Мало постов с просмотрами: {len(observed_views)}/{settings.min_posts}")
-    else:
-        if mean_views < settings.min_avg_views:
-            failures.append(f"Средние просмотры поста ниже {settings.min_avg_views}")
+    average_failures, average_uncertain = assess_average_views(row, settings)
+    failures.extend(average_failures)
+    uncertain.extend(average_uncertain)
     if days_since is None:
         uncertain.append("Не распознана дата последнего поста")
     elif settings.max_gap_days < days_since <= settings.abandoned_days:
@@ -239,7 +237,6 @@ def reassess_metrics(row, settings, now=None):
     row = dict(row)
     failures, uncertain = assess_post_views(row, settings)
     subs = row.get("subs")
-    mean_views = row.get("avg_views_exact", row.get("avg_views"))
     norm = float(settings.min_post_view_ratio)
     row["norm"] = norm
     last = utc_date(row.get("last_post"))
@@ -250,11 +247,9 @@ def reassess_metrics(row, settings, now=None):
         uncertain.append("Не распознано число подписчиков")
     elif not settings.min_subs <= subs <= settings.max_subs:
         failures.append("Подписчики вне выбранного диапазона")
-    if row.get("eligible_posts", 0) < settings.min_posts or mean_views is None:
-        uncertain.append("Мало постов с просмотрами для расчёта среднего")
-    else:
-        if mean_views < settings.min_avg_views:
-            failures.append("Средние просмотры ниже выбранного порога")
+    average_failures, average_uncertain = assess_average_views(row, settings)
+    failures.extend(average_failures)
+    uncertain.extend(average_uncertain)
     if days is None or days < 0:
         uncertain.append("Дата последнего поста не подтверждена")
     elif days > settings.abandoned_days:

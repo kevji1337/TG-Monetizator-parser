@@ -170,7 +170,8 @@ with st.sidebar:
         st.caption('Приватные каналы без публичного username или превью t.me/s нельзя проверить этим аудитором.')
     with st.expander("Критерии и скорость"):
         st.caption('Дополнительные критерии аудита публичного превью; они отделены от фильтров поиска TGStat.')
-        views = ui.number_input("Средние просмотры поста от", 0, 10_000_000, 300)
+        avg_ratio = ui.number_input('Средние просмотры от подписчиков, %', 0.0, 100.0, 10.0, step=0.5,
+                                    help='Средние просмотры постов / число подписчиков × 100. Например, 10% при 5000 подписчиков — 500 просмотров в среднем. 0 отключает этот порог.')
         post_age = ui.number_input('Возраст поста для оценки активности, часов', 1, 168, 24,
                                    help='Берётся пост, ближайший к этому возрасту, в пределах допустимого отклонения.')
         post_tolerance = ui.number_input('Допустимое отклонение возраста, часов', 0, post_age, min(6, post_age))
@@ -186,7 +187,7 @@ with st.sidebar:
                  disabled=mode.startswith('TGStat') and not TGStatProfiles(runner.repo).list()):
         try:
             settings = Settings(min_subs=min_subs, max_subs=max_subs, min_daily_reach=daily,
-                                min_avg_views=views, target_count=count, target_post_age_hours=post_age,
+                                min_avg_views=0, min_avg_view_ratio=avg_ratio, target_count=count, target_post_age_hours=post_age,
                                 post_age_tolerance_hours=post_tolerance, min_post_view_ratio=post_ratio,
                                 max_gap_days=gap, workers=workers, requests_per_second=rate,
                                 login_wait_seconds=60 if login_pause else 0, max_audits=audit_budget,
@@ -305,6 +306,7 @@ def results_panel():
         if st.button("Продолжить сохранённый запуск"):
             try:
                 resume_config = {**state["settings"], "max_audits": audit_budget, "max_minutes": time_limit,
+                                 'min_avg_views': 0, 'min_avg_view_ratio': avg_ratio,
                                  'target_post_age_hours': post_age, 'post_age_tolerance_hours': post_tolerance, 'min_post_view_ratio': post_ratio,
                                  "login_wait_seconds": 60 if login_pause else 0,
                                  'dev_mode': dev_mode, 'keep_browser_on_error': keep_browser, 'browser_wait_seconds': browser_wait,

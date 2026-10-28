@@ -1,7 +1,28 @@
 """Subscriber activity measured on the post closest to the selected age."""
 from datetime import datetime, timezone
 
-METRIC_VERSION = 'post-activity-1'
+METRIC_VERSION = 'post-activity-2-average-percent'
+
+
+def assess_average_views(row, settings):
+    """Apply the average threshold without rounding or trusting a cached ratio."""
+    failures, uncertain = [], []
+    mean_views = row.get('avg_views_exact', row.get('avg_views'))
+    subs = row.get('subs')
+    ratio = mean_views / subs * 100 if mean_views is not None and subs and subs > 0 else None
+    row.update(view_ratio_exact=ratio, view_ratio=round(ratio, 1) if ratio is not None else None,
+               min_avg_view_ratio=settings.min_avg_view_ratio)
+    if row.get('eligible_posts', 0) < settings.min_posts or mean_views is None:
+        uncertain.append('Мало постов с просмотрами для расчёта среднего')
+    else:
+        if settings.min_avg_view_ratio:
+            if ratio is None:
+                uncertain.append('Нет числа подписчиков для расчёта процента средних просмотров')
+            elif mean_views * 100 < subs * settings.min_avg_view_ratio:
+                failures.append(f'Средние просмотры ниже {settings.min_avg_view_ratio:g}% подписчиков')
+        if settings.min_avg_views and mean_views < settings.min_avg_views:
+            failures.append(f'Средние просмотры поста ниже {settings.min_avg_views}')
+    return failures, uncertain
 
 
 def _date(value):

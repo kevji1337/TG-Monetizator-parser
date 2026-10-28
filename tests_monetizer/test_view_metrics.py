@@ -2,8 +2,56 @@ import unittest
 
 from monetizer.audit import parse_channel_html, reassess_metrics
 from monetizer.settings import Settings
-from monetizer.view_metrics import assess_post_views
+from monetizer.view_metrics import assess_average_views, assess_post_views
 from test_core import NOW, preview
+
+
+class AveragePercentTests(unittest.TestCase):
+    def test_percentage_uses_subscriber_count_and_exact_boundary(self):
+        for subs, mean, rejected in [(4000, 400, False), (20000, 400, True),
+                                      (4999, 499, True), (3000, 300, False)]:
+            row = {'subs': subs, 'avg_views_exact': mean, 'eligible_posts': 6, 'view_ratio_exact': 100}
+            failures, uncertain = assess_average_views(row, Settings())
+            self.assertEqual(bool(failures), rejected)
+            self.assertFalse(uncertain)
+            self.assertAlmostEqual(row['view_ratio_exact'], mean / subs * 100)
+
+    def test_legacy_settings_preserve_units_without_converting_300_to_percent(self):
+        legacy = Settings.from_saved({'min_avg_views': 300})
+        self.assertIsNone(legacy.min_avg_view_ratio)
+        self.assertEqual(legacy.min_avg_views, 300)
+        self.assertEqual(Settings().min_avg_view_ratio, 10)
+        self.assertEqual(Settings().min_avg_views, 0)
+        row = {'subs': 20000, 'avg_views_exact': 400, 'eligible_posts': 6}
+        self.assertFalse(assess_average_views(row, legacy)[0])
+        self.assertTrue(assess_average_views(row, Settings())[0])
+
+    def test_average_and_day_old_post_checks_are_independent(self):
+        html = preview(subs='5K', views=100)
+        html = html.replace('>100</span>', '>500</span>', 1)
+        row = parse_channel_html(html, 'expert_blog', now=NOW)
+        self.assertEqual(row['activity_status'], 'pass')
+        self.assertEqual(row['status'], 'rejected')
+        self.assertIn('Средние просмотры ниже 10%', row['reasons'])
+        result = reassess_metrics(row, Settings(min_avg_view_ratio=3), now=NOW)
+        self.assertEqual(result['metric_status'], 'top')
+
+    def test_missing_denominator_and_small_sample_need_review(self):
+        for subs in (None, 0):
+            failures, uncertain = assess_average_views({'subs': subs, 'avg_views_exact': 500, 'eligible_posts': 6}, Settings())
+            self.assertFalse(failures)
+            self.assertTrue(uncertain)
+        self.assertTrue(assess_average_views({'subs': 5000, 'avg_views_exact': 500, 'eligible_posts': 1}, Settings())[1])
+        self.assertEqual(assess_average_views({'subs': 5000, 'avg_views_exact': 1, 'eligible_posts': 6}, Settings(min_avg_view_ratio=0)), ([], []))
+
+    def test_invalid_percent_and_saved_preferences(self):
+        from monetizer.preferences import last_run_preferences, widget_key
+        for value in (-1, 101, float('nan'), float('inf'), True, '10'):
+            with self.assertRaises(ValueError):
+                Settings(min_avg_view_ratio=value)
+        key = widget_key('number_input', 'Средние просмотры от подписчиков, %')
+        self.assertNotIn(key, last_run_preferences({'settings': {'min_avg_views': 300}}))
+        self.assertEqual(last_run_preferences({'settings': Settings(min_avg_view_ratio=12.5).to_dict()})[key], 12.5)
 
 
 class PostActivityTests(unittest.TestCase):

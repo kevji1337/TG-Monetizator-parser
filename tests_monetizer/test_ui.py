@@ -58,6 +58,8 @@ class InterfaceTests(unittest.TestCase):
             self.assertEqual(next(n for n in app.number_input if n.label == 'Возраст поста для оценки активности, часов').value, 24)
             self.assertEqual(next(n for n in app.number_input if n.label == 'Допустимое отклонение возраста, часов').value, 6)
             self.assertEqual(next(n for n in app.number_input if n.label == 'Просмотры поста от подписчиков, %').value, 10)
+            self.assertEqual(next(n for n in app.number_input if n.label == 'Средние просмотры от подписчиков, %').value, 10)
+            self.assertFalse(any(n.label == 'Средние просмотры поста от' for n in app.number_input))
             next(s for s in app.slider if s.label == 'Возраст канала, месяцев').set_value((24, 60)).run()
             next(s for s in app.slider if s.label == 'Уровень вовлечённости ERR, %').set_value((15, 80)).run()
             next(n for n in app.number_input if n.label == 'Подписчики от').set_value(5000).run()
@@ -65,6 +67,7 @@ class InterfaceTests(unittest.TestCase):
             next(n for n in app.number_input if n.label == 'Возраст поста для оценки активности, часов').set_value(30).run()
             next(n for n in app.number_input if n.label == 'Допустимое отклонение возраста, часов').set_value(4).run()
             next(n for n in app.number_input if n.label == 'Просмотры поста от подписчиков, %').set_value(12.0).run()
+            next(n for n in app.number_input if n.label == 'Средние просмотры от подписчиков, %').set_value(15.0).run()
             next(b for b in app.button if b.label == 'Начать поиск и аудит').click().run()
             settings = start.call_args.args[0]
             self.assertEqual(settings.category_ids, ('34',))
@@ -76,6 +79,8 @@ class InterfaceTests(unittest.TestCase):
             self.assertEqual(settings.target_post_age_hours, 30)
             self.assertEqual(settings.post_age_tolerance_hours, 4)
             self.assertEqual(settings.min_post_view_ratio, 12)
+            self.assertEqual(settings.min_avg_view_ratio, 15)
+            self.assertEqual(settings.min_avg_views, 0)
             self.assertNotIn('queries', start.call_args.kwargs)
             self.assertEqual(len(app.exception), 0)
 
