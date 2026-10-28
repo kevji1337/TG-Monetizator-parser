@@ -17,8 +17,8 @@ def _navigate(section, profile_id=None):
             st.session_state[widget_key('radio', 'Источник')] = 'TGStat — каталог тематик'
 
 
-def _flash(message):
-    st.session_state['_tgstat_profile_notice'] = message
+def _flash(message, level='info'):
+    st.session_state['_tgstat_profile_notice'] = {'message': message, 'level': level}
     st.rerun()
 
 
@@ -49,14 +49,24 @@ def profile_picker(runner, ui):
     return selected or DEFAULT_PROFILE, auto_switch
 
 
-def _close(session_id):
-    try:
-        with st.spinner('Закрываю Chrome и жду записи профиля…'):
-            result = close_retained(session_id) or {}
+def _queue_browser_action(kind, profile_id=None, session_id=None):
+    # Callbacks only enqueue. Slow browser calls run before the card is drawn.
+    st.session_state['_tgstat_browser_action'] = {'kind': kind, 'profile_id': profile_id, 'session_id': session_id}
+    st.session_state['_tgstat_manager_pending'] = st.session_state.get('tgstat_manager_selection')
+
+
+def _perform_browser_action(action, store):
+    if action['kind'] == 'open':
+        open_for_login(action['profile_id'], repo=store.repo)
+        return 'Chrome открыт. Войдите в TGStat, затем нажмите «Проверить вход».'
+    if action['kind'] == 'check':
+        result = check_retained_login(action['session_id'])
+        return AUTH_LABELS[result['auth_status']] + '. ' + result['auth_reason']
+    if action['kind'] == 'close':
+        result = close_retained(action['session_id']) or {}
         message = ('Окно уже было закрыто вне панели.' if result.get('close_status') == 'already_closed' else 'Chrome закрыт штатно.')
-        _flash(message + ' ' + AUTH_LABELS.get(result.get('auth_status'), 'Вход не подтверждён'))
-    except Exception as exc:
-        _error(exc)
+        return message + ' ' + AUTH_LABELS.get(result.get('auth_status'), 'Вход не подтверждён')
+    raise ValueError('Неизвестное действие с профилем')
 
 
 def _profile_card(store, selected, labels, sessions, busy):
@@ -76,22 +86,13 @@ def _profile_card(store, selected, labels, sessions, busy):
         st.caption(saved['auth_reason'])
     opened = next((item for item in sessions if item.get('profile_id') == selected), None)
     first, second, third = st.columns(3)
-    if first.button('Открыть Chrome', type='primary', width='stretch', disabled=busy or bool(sessions)):
-        try:
-            with st.spinner('Открываю профиль для входа…'):
-                open_for_login(selected, repo=store.repo)
-            _flash('Chrome открыт. Войдите в TGStat, затем нажмите «Проверить вход».')
-        except Exception as exc:
-            _error(exc)
-    if second.button('Проверить вход', width='stretch', disabled=busy or opened is None):
-        try:
-            with st.spinner('Проверяю страницу TGStat…'):
-                result = check_retained_login(opened['session_id'])
-            _flash(AUTH_LABELS[result['auth_status']] + '. ' + result['auth_reason'])
-        except Exception as exc:
-            _error(exc)
-    if third.button('Закрыть Chrome', width='stretch', disabled=busy or opened is None):
-        _close(opened['session_id'])
+    session_id = opened['session_id'] if opened else None
+    first.button('Открыть Chrome', type='primary', width='stretch', disabled=busy or bool(sessions),
+                 key='tgstat_open_profile', on_click=_queue_browser_action, args=('open', selected))
+    second.button('Проверить вход', width='stretch', disabled=busy or opened is None,
+                  key='tgstat_check_profile', on_click=_queue_browser_action, args=('check', selected, session_id))
+    third.button('Закрыть Chrome', width='stretch', disabled=busy or opened is None,
+                 key='tgstat_close_profile', on_click=_queue_browser_action, args=('close', selected, session_id))
     st.button('Использовать для поиска', disabled=busy, on_click=_navigate, args=('Поиск', selected))
     with st.expander('Название и удаление', expanded=False):
         if selected != DEFAULT_PROFILE:
@@ -123,11 +124,42 @@ def _profile_card(store, selected, labels, sessions, busy):
 
 
 def profile_manager(runner, ui):
+    # Replacing this single slot clears the complete previous card before any
+    # blocking operation. A stable notice slot also prevents column path shifts.
+    workspace = st.empty()
+    action = st.session_state.pop('_tgstat_browser_action', None)
+    if action:
+        descriptions = {'open': 'Открываю Chrome для входа…', 'check': 'Проверяю вход в TGStat…',
+                        'close': 'Закрываю Chrome и жду записи профиля…'}
+        workspace.info(descriptions.get(action['kind'], 'Обрабатываю профиль…'))
+        try:
+            state = runner.snapshot()
+            if state['status'] in ('running', 'stopping') or state.get('external_owner', False):
+                raise RuntimeError('Сначала остановите поиск, затем повторите действие с профилем.')
+            message = _perform_browser_action(action, TGStatProfiles(runner.repo))
+        except Exception as exc:
+            if isinstance(exc, (ValueError, RuntimeError)):
+                message = str(exc)
+            else:
+                logger().exception('TGStat browser action failed kind=%s', action['kind'])
+                message = 'Не удалось выполнить действие. Подробности в Dev-диагностике.'
+            _flash(message, level='error')
+        _flash(message)
+    with workspace.container():
+        _profile_workspace(runner, ui)
+
+
+def _profile_workspace(runner, ui):
     st.subheader('Профили TGStat')
     st.caption('Отдельный аккаунт в каждом профиле Chrome. Выберите профиль слева, действия доступны справа.')
     notice = st.session_state.pop('_tgstat_profile_notice', None)
+    notice_slot = st.empty()
     if notice:
-        st.info(notice)
+        message = notice if isinstance(notice, str) else notice['message']
+        if isinstance(notice, dict) and notice.get('level') == 'error':
+            notice_slot.error(message)
+        else:
+            notice_slot.info(message)
     store = TGStatProfiles(runner.repo)
     profiles = store.list()
     labels = {item['id']: item['name'] for item in profiles}
@@ -174,8 +206,8 @@ def profile_manager(runner, ui):
         for session in sessions:
             if session.get('profile_id') != selected:
                 st.info('Сейчас открыт другой профиль: ' + store.name(session.get('profile_id')))
-                if st.button('Закрыть другое окно Chrome', key='close_other_' + session['session_id'], disabled=busy):
-                    _close(session['session_id'])
+                st.button('Закрыть другое окно Chrome', key='close_other_' + session['session_id'], disabled=busy,
+                          on_click=_queue_browser_action, args=('close', session.get('profile_id'), session['session_id']))
     deleted = store.archived()
     with st.expander(f'Удалённые профили ({len(deleted)})', expanded=False):
         st.caption('Сессии остаются на этом компьютере. Восстановление вернёт профиль в выбор и будущие новые поиски.')

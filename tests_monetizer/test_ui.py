@@ -244,6 +244,58 @@ class InterfaceTests(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             browser.assert_not_called()
 
+    def test_close_chrome_runs_before_card_and_renders_workspace_once(self):
+        import monetizer.ui_tgstat_profiles as profiles_ui
+        sessions = [{'session_id': 'fake-session', 'profile_id': 'default'}]
+        order = []
+        original = profiles_ui._profile_card
+
+        def render_card(*args):
+            order.append('card')
+            return original(*args)
+
+        def close(session_id):
+            self.assertEqual(session_id, 'fake-session')
+            self.assertEqual(order, [])  # No partially rendered new card while closing.
+            order.append('close')
+            sessions.clear()
+            return {'closed': True, 'close_status': 'closed', 'auth_status': 'authenticated'}
+
+        with patch.object(profiles_ui, 'retained_sessions', side_effect=lambda **kwargs: list(sessions)), \
+                patch.object(profiles_ui, 'close_retained', side_effect=close) as closing, \
+                patch.object(profiles_ui, '_profile_card', side_effect=render_card), \
+                patch.object(profiles_ui, 'open_for_login') as browser:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(b for b in app.button if b.label == 'Управлять профилями').click().run()
+            order.clear()
+            next(b for b in app.button if b.label == 'Закрыть Chrome').click().run()
+            self.assertEqual(order, ['close', 'card'])
+            self.assertEqual(len([r for r in app.radio if r.label == 'Аккаунты TGStat']), 1)
+            self.assertEqual(len([b for b in app.button if b.label == 'Закрыть Chrome']), 1)
+            self.assertTrue(next(b for b in app.button if b.label == 'Закрыть Chrome').disabled)
+            self.assertFalse(next(b for b in app.button if b.label == 'Открыть Chrome').disabled)
+            self.assertTrue(any('Chrome закрыт штатно' in item.value for item in app.info))
+            with self.assertRaises(KeyError):
+                app.session_state['_tgstat_browser_action']
+            self.assertEqual(len(app.exception), 0)
+            closing.assert_called_once()
+            browser.assert_not_called()
+
+    def test_close_error_keeps_one_card_and_allows_retry(self):
+        import monetizer.ui_tgstat_profiles as profiles_ui
+        sessions = [{'session_id': 'fake-session', 'profile_id': 'default'}]
+        with patch.object(profiles_ui, 'retained_sessions', side_effect=lambda **kwargs: list(sessions)), \
+                patch.object(profiles_ui, 'close_retained', side_effect=RuntimeError('Chrome ещё работает')) as closing:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(b for b in app.button if b.label == 'Управлять профилями').click().run()
+            next(b for b in app.button if b.label == 'Закрыть Chrome').click().run()
+            self.assertTrue(any('Chrome ещё работает' in item.value for item in app.error))
+            self.assertEqual(len([r for r in app.radio if r.label == 'Аккаунты TGStat']), 1)
+            self.assertFalse(next(b for b in app.button if b.label == 'Закрыть Chrome').disabled)
+            self.assertTrue(next(b for b in app.button if b.label == 'Открыть Chrome').disabled)
+            self.assertEqual(len(app.exception), 0)
+            closing.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
