@@ -26,6 +26,13 @@ def healthy():
         return False
 
 
+def server_command(dev=False):
+    return [sys.executable, '-m', 'streamlit', 'run', str(ROOT / 'monetizer_app.py'),
+            '--server.address=127.0.0.1', '--server.port=8501', '--server.headless=true',
+            '--browser.gatherUsageStats=false', '--server.fileWatcherType=poll', '--server.runOnSave=true',
+            '--logger.level=' + ('info' if dev else 'warning')]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dev', action='store_true', help='Console logs and Streamlit debug logging')
@@ -45,10 +52,7 @@ def main():
     environment['PYTHONUNBUFFERED'] = '1'
     if args.dev:
         environment['MONETIZER_DEV'] = '1'
-    process = subprocess.Popen([sys.executable, "-m", "streamlit", "run", str(ROOT / "monetizer_app.py"),
-                                "--server.address=127.0.0.1", "--server.port=8501", "--server.headless=true",
-                                "--browser.gatherUsageStats=false", '--server.fileWatcherType=' + ('poll' if args.dev else 'none'),
-                                '--logger.level=' + ('info' if args.dev else 'warning')], cwd=ROOT,
+    process = subprocess.Popen(server_command(args.dev), cwd=ROOT,
                                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding='utf-8', errors='replace')
     def capture():

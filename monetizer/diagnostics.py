@@ -9,10 +9,12 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from .runtime import shared_state
+
 LOG_DIR = Path(os.environ.get('MONETIZER_LOG_DIR', Path(__file__).resolve().parents[1] / 'results/monetizer/logs'))
 LOG_PATH = LOG_DIR / 'application.log'
-_lock = threading.RLock()
-_retained = {}
+_lock = shared_state()['browser_lock']
+_retained = shared_state()['browsers']
 
 
 def redact(text):

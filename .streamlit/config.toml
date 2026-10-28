@@ -1,0 +1,7 @@
+[server]
+runOnSave = true
+fileWatcherType = "poll"
+folderWatchBlacklist = [".venv", "venv", ".git", "results", "reports", "sessions", "logs", "tests_monetizer"]
+
+[browser]
+gatherUsageStats = false

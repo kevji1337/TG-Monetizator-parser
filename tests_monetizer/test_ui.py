@@ -21,10 +21,13 @@ class InterfaceTests(unittest.TestCase):
         self.profile_root.start()
         self.factory = patch("monetizer.runner.JobRunner", return_value=self.runner)
         self.factory.start()
+        self.runtime = patch('monetizer.runtime.acquire_runner', side_effect=lambda factory: factory())
+        self.runtime.start()
         self.app_path = Path(__file__).resolve().parents[1] / "monetizer_app.py"
 
     def tearDown(self):
         self.factory.stop()
+        self.runtime.stop()
         self.profile_root.stop()
         self.directory.cleanup()
         st.cache_resource.clear()
@@ -38,6 +41,20 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn('Медицина', choices.options)
         self.assertFalse(any(t.label == 'Запросы — можно изменить' for t in app.text_area))
         self.assertEqual(len(app.exception), 0)
+
+    def test_sidebar_navigation_has_home_and_primary_controls_before_options(self):
+        with patch.object(self.runner, 'start') as start:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            self.assertEqual(len([r for r in app.sidebar.radio if r.label == 'Раздел']), 1)
+            self.assertFalse(any(r.label == 'Раздел' for r in app.main.radio))
+            for label in ('AI-аудит Gemini', 'Фильтры TGStat', 'Разделы приложения'):
+                self.assertFalse(next(e for e in app.sidebar.expander if e.label == label).proto.expanded)
+            next(r for r in app.radio if r.label == 'Раздел').set_value('Профили TGStat').run()
+            next(b for b in app.sidebar.button if b.label == 'На главную — поиск').click().run()
+            self.assertEqual(next(r for r in app.radio if r.label == 'Раздел').value, 'Поиск')
+            self.assertTrue(any(m.label == 'Подходящие / цель' for m in app.metric))
+            self.assertEqual(len(app.exception), 0)
+            start.assert_not_called()
 
     def test_category_scope_limits_optional_audit_focus(self):
         app = AppTest.from_file(str(self.app_path)).run(timeout=15)
