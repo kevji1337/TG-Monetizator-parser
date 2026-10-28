@@ -3,7 +3,7 @@ import json
 import tempfile
 from pathlib import Path
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from monetizer.qualification import qualify, extract_offers
 from monetizer.repository import Repository
@@ -12,8 +12,14 @@ from monetizer.settings import Settings
 
 
 def expert(username="expert_blog"):
+    observed = datetime.now(timezone.utc)
+    published = observed - timedelta(days=1)
     return {"username": "@" + username, "title": "Анна — моушн-дизайнер", "status": "recommended",
             "reasons": "Метрики соответствуют", "subs": 4000, "avg_views": 800,
+            'avg_views_exact': 800, 'view_ratio_exact': 20, 'eligible_posts': 6, 'post_count': 6,
+            'last_post': published.isoformat(), 'avg_gap_days': 1,
+            'post_observations': [{'id': f'{username}/1', 'date': published.isoformat(),
+                                   'observed_at': observed.isoformat(), 'views': 800, 'subs_at_observation': 4000}],
             "audited_at": datetime.now(timezone.utc).isoformat(), "link": f"https://t.me/{username}",
             "about_text": "Я дизайнер. Работаю с After Effects и Lottie.",
             "content_samples": [{"id": f"{username}/1", "url": f"https://t.me/{username}/1", "date": "2026-10-15T10:00:00+00:00",
@@ -64,6 +70,8 @@ class QualificationTests(unittest.TestCase):
         row = expert()
         row.update(eligible_posts=8, post_count=8, avg_gap_days=1, last_post=datetime.now(timezone.utc).isoformat(),
                    avg_views_exact=800, view_ratio_exact=20)
+        row['post_observations'] = [{'id': 'expert_blog/1', 'date': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+                                     'observed_at': row['last_post'], 'views': 800, 'subs_at_observation': 4000}]
         self.assertEqual(reassess_metrics(row, Settings())["metric_status"], "recommended")
         self.assertEqual(reassess_metrics(row, Settings(min_avg_views=1000))["metric_status"], "rejected")
 

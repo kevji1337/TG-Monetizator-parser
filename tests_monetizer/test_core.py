@@ -55,9 +55,9 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(row["author_contact"], "@expert_contact")
 
     def test_subscriber_threshold_and_no_rounding_promotion(self):
-        small = parse_channel_html(preview(subs="4,999", views=749), "expert_blog", now=NOW)
+        small = parse_channel_html(preview(subs="4,999", views=499), "expert_blog", now=NOW)
         self.assertEqual(small["status"], "rejected")
-        self.assertEqual(small["norm"], 15)
+        self.assertEqual(small["norm"], 10)
         row = parse_channel_html(preview(subs="5K", views=500), "expert_blog", now=NOW)
         self.assertEqual(row["status"], "top")
         self.assertEqual(row["norm"], 10)

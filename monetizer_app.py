@@ -171,7 +171,12 @@ with st.sidebar:
     with st.expander("Критерии и скорость"):
         st.caption('Дополнительные критерии аудита публичного превью; они отделены от фильтров поиска TGStat.')
         views = ui.number_input("Средние просмотры поста от", 0, 10_000_000, 300)
-        mature = ui.number_input("Возраст поста для просмотров, часов", 0, 168, 24)
+        post_age = ui.number_input('Возраст поста для оценки активности, часов', 1, 168, 24,
+                                   help='Берётся пост, ближайший к этому возрасту, в пределах допустимого отклонения.')
+        post_tolerance = ui.number_input('Допустимое отклонение возраста, часов', 0, post_age, min(6, post_age))
+        post_ratio = ui.number_input('Просмотры поста от подписчиков, %', 0.1, 100.0, 10.0, step=0.5)
+        st.caption(f'Берётся ближайший к {post_age} ч пост возрастом {post_age - post_tolerance}–{post_age + post_tolerance} ч. '
+                   f'Порог: {post_ratio:g}% подписчиков. При 5000 подписчиков и 10% нужно 500 просмотров.')
         gap = ui.number_input("Максимальный интервал публикаций, дней", 1.0, 14.0, 4.0, step=.5)
         workers = ui.slider("Параллельных аудитов", 1, 8, 4)
         rate = ui.slider("Запросов к Telegram в секунду", .5, 5.0, 2.0, step=.5)
@@ -181,7 +186,8 @@ with st.sidebar:
                  disabled=mode.startswith('TGStat') and not TGStatProfiles(runner.repo).list()):
         try:
             settings = Settings(min_subs=min_subs, max_subs=max_subs, min_daily_reach=daily,
-                                min_avg_views=views, target_count=count, mature_hours=mature,
+                                min_avg_views=views, target_count=count, target_post_age_hours=post_age,
+                                post_age_tolerance_hours=post_tolerance, min_post_view_ratio=post_ratio,
                                 max_gap_days=gap, workers=workers, requests_per_second=rate,
                                 login_wait_seconds=60 if login_pause else 0, max_audits=audit_budget,
                                 max_minutes=time_limit, new_only=new_only, micro_id=micro_id,
@@ -299,6 +305,7 @@ def results_panel():
         if st.button("Продолжить сохранённый запуск"):
             try:
                 resume_config = {**state["settings"], "max_audits": audit_budget, "max_minutes": time_limit,
+                                 'target_post_age_hours': post_age, 'post_age_tolerance_hours': post_tolerance, 'min_post_view_ratio': post_ratio,
                                  "login_wait_seconds": 60 if login_pause else 0,
                                  'dev_mode': dev_mode, 'keep_browser_on_error': keep_browser, 'browser_wait_seconds': browser_wait,
                                  'tgstat_profile_id': state['settings'].get('tgstat_profile_id', 'default'),
@@ -363,7 +370,7 @@ def results_panel():
                                    placeholder='Все причины')
     if 'non_target' in reason_filter:
         st.caption('Для просмотра нецелевых типов снимите ниже флажок «Скрыть новости, агрегаторы, школы…».')
-    st.caption("Зелёная метка: метрики + признаки личной практики минимум в двух источниках + соответствие теме. Это предварительный отбор. Суточный охват проверяется фильтром TGStat; здесь показываются просмотры постов. Низкое отношение просмотров к подписчикам не доказывает накрутку.")
+    st.caption("Зелёная метка: метрики, включая активность поста около заданного возраста, + признаки личной практики минимум в двух источниках + соответствие теме. Это предварительный отбор. Охват TGStat и счётчики просмотров Telegram показываются отдельно. Низкое отношение просмотров к подписчикам не доказывает накрутку.")
     filter_columns = st.columns([1, 1, 2])
     only_green = ui.on(filter_columns[0]).checkbox("Только зелёные")
     only_contact = ui.on(filter_columns[1]).checkbox("С кандидатом контакта")
@@ -376,7 +383,7 @@ def results_panel():
                 and (not search or search.casefold() in f"{r.get('title', '')} {r['username']}".casefold())]
     st.caption(f"Показано {len(selected)} из {len(rows)}. Скачивание учитывает фильтры.")
     st.caption('Неопределённые каналы остаются с жёлтой меткой; они не входят в цель поиска. Снимите фильтр, чтобы увидеть отклонённые типы и основания.')
-    visible = ["verdict", "channel_type", "title", "username", "subs", "avg_views", "median_views", "view_ratio", "freq",
+    visible = ["verdict", "channel_type", "title", "username", "subs", "activity_ratio", "activity_post_age_hours", "activity_post_url", "avg_views", "median_views", "view_ratio", "freq",
                "last_post", "youtube", "instagram", "author_contact", "reasons", "link"]
     if state.get('settings', {}).get('ai_enabled'):
         visible.insert(2, 'ai_audit_status')
@@ -387,7 +394,7 @@ def results_panel():
                            TYPE_LABELS.get(r.get(k), 'Не установлено') if k == 'channel_type' else r.get(k)
                            for k in visible} for r in selected], columns=[COLUMNS[k] for k in visible])
     st.dataframe(frame, hide_index=True, width="stretch",
-                 column_config={COLUMNS[k]: st.column_config.LinkColumn(COLUMNS[k]) for k in ("link", "youtube", "instagram")})
+                 column_config={COLUMNS[k]: st.column_config.LinkColumn(COLUMNS[k]) for k in ("link", "youtube", "instagram", 'activity_post_url')})
     if selected:
         csv_data, xlsx_data = downloads(selected)
         filename = f"Монетизация_{state.get('run_id', 'каналы')[:12]}"

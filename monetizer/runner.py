@@ -21,6 +21,7 @@ from .profile import load_profile, profile_version
 from .search import TGStatSearch, SearchBudgetExceeded
 from .profile_search import ProfileSearch, profile_plan, reconcile_profiles
 from .settings import Settings
+from .view_metrics import METRIC_VERSION
 from .categories import category_key, category_label, category_id_from_key, CATEGORY_RULES_VERSION
 from .tgstat_filters import filter_spec
 from .diagnostics import BrowserControl, logger, retained_sessions
@@ -121,7 +122,7 @@ class JobRunner:
         assessment_settings = {key: value for key, value in settings.to_dict().items()
                                if key not in ('tgstat_profile_id', 'tgstat_auto_switch')}
         return hashlib.sha256(dumps([content_hash(row), assessment_settings, self.state.get('niche', ''),
-                                     RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, PROMPT_VERSION, QUEUE_VERSION, PRIORITY_VERSION, profile_version(profile),
+                                     RULE_VERSION, METRIC_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION, PROMPT_VERSION, QUEUE_VERSION, PRIORITY_VERSION, profile_version(profile),
                                      datetime.now(timezone.utc).date().isoformat()]).encode()).hexdigest()
 
     def _mark_pending(self, settings):

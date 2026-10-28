@@ -13,7 +13,7 @@ COLUMNS = {
     "avg_views": "Средние просмотры поста", "median_views": "Медиана просмотров",
     "view_ratio": "Просмотры/подписчики, %", "norm": "Порог, %", "freq": "Частота",
     "last_post": "Последний пост (UTC)", "days_since_last": "Дней без постов",
-    "post_count": "Постов в выборке", "eligible_posts": "Зрелых постов с просмотрами",
+    "post_count": "Постов в выборке", "eligible_posts": "Постов с просмотрами",
     "youtube": "YouTube", "instagram": "Instagram", "author_contact": "Кандидат контакта",
     "contact_candidates": "Все кандидаты", "contact_status": "Статус контакта",
     "producer_status": "Наличие продюсера", "sales_links": "Ссылки продаж",
@@ -35,6 +35,12 @@ COLUMNS = {
     'next_contact_date': 'Дата следующего контакта', 'next_action_label': 'Следующее действие',
     'contact_plan_note': 'Пояснение к действию', 'contact_plan_state': 'Срок действия',
     'last_action_at': 'Последнее выполненное действие (UTC)',
+    'activity_status': 'Проверка активности', 'activity_ratio': 'Просмотры выбранного поста / подписчики, %',
+    'activity_post_age_hours': 'Возраст поста при замере, ч', 'activity_post_url': 'Пост для оценки активности',
+    'activity_views': 'Просмотры выбранного поста', 'activity_subscribers': 'Подписчики при замере',
+    'activity_observed_at': 'Время замера активности (UTC)',
+    'activity_target_age_hours': 'Целевой возраст поста, ч', 'activity_age_tolerance_hours': 'Отклонение возраста поста, ч',
+    'activity_evidence': 'Замер активности поста',
 }
 
 

@@ -253,7 +253,8 @@ def qualify(row, topic="", niche_id="", micro_id="", category_ids=()):
     metric_status = row.get("metric_status", row.get("status", "error"))
     metric_reasons = row.get("metric_reasons", row.get("reasons", ""))
     row["metric_status"], row["metric_reasons"] = metric_status, metric_reasons
-    row["metrics"] = {k: row.get(k) for k in ("subs", "avg_views", "median_views", "view_ratio", "norm", "avg_gap_days", "days_since_last")}
+    row["metrics"] = {k: row.get(k) for k in ("subs", "avg_views", "median_views", "view_ratio", "norm", "avg_gap_days", "days_since_last",
+                                            'activity_status', 'activity_ratio', 'activity_post_url', 'activity_post_age_hours')}
     classification = classify_content(row, topic, niche_id, micro_id, category_ids)
     row.update(classification=classification, channel_type=classification["channel_type"],
                relevance=classification["relevance"], offers=extract_offers(row), producer_status="Не установлено")

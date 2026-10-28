@@ -20,7 +20,13 @@ def candidate_card(row):
     left, middle, right = st.columns(3)
     left.metric('Подписчики', row.get('subs') if row.get('subs') is not None else 'Нет данных')
     middle.metric('Средние просмотры', row.get('avg_views') if row.get('avg_views') is not None else 'Нет данных')
-    right.metric('Просмотры / подписчики', f"{row['view_ratio']:g}%" if isinstance(row.get('view_ratio'), (int, float)) else 'Нет данных')
+    right.metric(f"Пост ≈{row.get('activity_target_age_hours', 24)} ч / подписчики",
+                 f"{row['activity_ratio']:g}%" if isinstance(row.get('activity_ratio'), (int, float)) else 'Нет замера')
+    if row.get('activity_post_url'):
+        st.caption(f"Возраст выбранного поста: {row.get('activity_post_age_hours', '?')} ч. "
+                   f"Просмотры: {row.get('activity_views', '?')}; подписчики: {row.get('activity_subscribers', '?')}. "
+                   f"Порог: {row.get('norm', 10):g}%.")
+        st.link_button('Открыть пост с замером', row['activity_post_url'])
     st.caption(TYPE_LABELS.get(row.get('channel_type'), 'Тип не установлен') + ' · ' +
                RELEVANCE.get(row.get('relevance'), 'Тема требует проверки'))
     review = row.get('api_ai_review') if not row.get('assessment_stale') else None

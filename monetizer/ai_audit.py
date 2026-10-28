@@ -57,7 +57,9 @@ def request_data(row, settings, topic, profile):
         'channel_id': normalize_username(row['username']), 'title': row.get('title', ''),
         'sources': evidence_sources(row), 'topic': topic,
         'focus': [{'id': p['id'], 'title': p['title'], 'terms': p['match_terms']} for p in profiles],
-        'metrics': {k: row.get(k) for k in ('subs', 'avg_views', 'view_ratio', 'last_post', 'avg_gap_days')},
+        'metrics': {k: row.get(k) for k in ('subs', 'avg_views', 'view_ratio', 'last_post', 'avg_gap_days',
+                                          'activity_status', 'activity_ratio', 'activity_evidence',
+                                          'activity_target_age_hours', 'activity_age_tolerance_hours', 'norm', 'metric_rule_version')},
         'sender_profile': profile,
     }
     # Keep all post IDs/dates and literal text prefixes. Never summarize evidence

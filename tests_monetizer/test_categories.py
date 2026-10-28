@@ -183,7 +183,7 @@ class CategoryPipelineTests(unittest.TestCase):
     def run_job(self, settings, resume=False):
         with patch('monetizer.runner.TGStatSearch', FakeSearch), patch('monetizer.runner.WebAuditor') as auditor, \
                 patch('monetizer.runner.save_reports', return_value=([], [])):
-            auditor.return_value.audit.side_effect = lambda name: {**expert(name), **({'status': 'rejected'} if name == 'bad_blog' else {})}
+            auditor.return_value.audit.side_effect = lambda name: {**expert(name), **({'status': 'rejected', 'avg_views': 100, 'avg_views_exact': 100} if name == 'bad_blog' else {})}
             self.runner.start(settings, niche='Дизайн', resume=resume)
             self.runner.thread.join(10)
         self.assertFalse(self.runner.thread.is_alive())

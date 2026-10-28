@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 
 from .settings import Settings
+from .view_metrics import assess_post_views
 
 
 class Cancelled(Exception):
@@ -147,14 +148,13 @@ def parse_channel_html(html, username, settings=None, now=None):
     dated = sorted((p for p in posts.values() if p["date"] is not None),
                    key=lambda p: p["date"], reverse=True)[:settings.posts_limit]
     valid_dates = [p["date"] for p in dated if p["date"] <= now]
-    mature = [p["views"] for p in dated if p["views"] is not None
-              and (now - p["date"]).total_seconds() >= settings.mature_hours * 3600]
-    mean_views = statistics.mean(mature) if mature else None
+    observed_views = [p["views"] for p in dated if p["views"] is not None and p['date'] <= now]
+    mean_views = statistics.mean(observed_views) if observed_views else None
     avg = round(mean_views, 1) if mean_views is not None else None
-    median = round(statistics.median(mature), 1) if mature else None
+    median = round(statistics.median(observed_views), 1) if observed_views else None
     exact_ratio = mean_views / subs * 100 if mean_views is not None and subs else None
     ratio = round(exact_ratio, 1) if exact_ratio is not None else None
-    norm = 15.0 if subs is not None and subs < 5000 else 10.0 if subs is not None else None
+    norm = float(settings.min_post_view_ratio)
     last_date = max(valid_dates) if valid_dates else None
     days_since = (now - last_date).total_seconds() / 86400 if last_date else None
     interval = None
@@ -184,7 +184,7 @@ def parse_channel_html(html, username, settings=None, now=None):
            "freq": freq, "avg_gap_days": round(interval, 2) if interval is not None else None,
            "last_post": last_date.isoformat() if last_date else "",
            "days_since_last": round(days_since, 2) if days_since is not None else None,
-           "post_count": len(dated), "eligible_posts": len(mature),
+           "post_count": len(dated), "eligible_posts": len(observed_views),
            "youtube": youtube[0] if youtube else "", "instagram": instagram[0] if instagram else "",
            "external_links": " | ".join(links), "sales_links": " | ".join(sales),
            "author_contact": contacts[0] if contacts else "", "contact_candidates": " | ".join(contacts),
@@ -193,21 +193,21 @@ def parse_channel_html(html, username, settings=None, now=None):
            "error_code": "", "error": "", "pitch": "",
            "about_text": about.get_text(" ", strip=True)[:3000] if about else "",
            "about_links": _links([about]), "avg_views_exact": mean_views, "view_ratio_exact": exact_ratio,
-           "content_samples": samples}
-    failures, uncertain = [], []
+           "content_samples": samples,
+           'post_observations': [{'id': p['id'], 'date': p['date'].isoformat(), 'views': p['views'],
+                                  'observed_at': now.isoformat(), 'subs_at_observation': subs} for p in dated]}
+    failures, uncertain = assess_post_views(row, settings)
     if subs is None:
         uncertain.append("Не распознано число подписчиков")
     elif not settings.min_subs <= subs <= settings.max_subs:
         failures.append(f"Подписчики вне диапазона {settings.min_subs}–{settings.max_subs}")
     if days_since is not None and days_since > settings.abandoned_days:
         failures.append(f"Заброшен: более {settings.abandoned_days} дней без постов")
-    if len(mature) < settings.min_posts:
-        uncertain.append(f"Мало зрелых постов: {len(mature)}/{settings.min_posts}")
+    if len(observed_views) < settings.min_posts:
+        uncertain.append(f"Мало постов с просмотрами: {len(observed_views)}/{settings.min_posts}")
     else:
         if mean_views < settings.min_avg_views:
             failures.append(f"Средние просмотры поста ниже {settings.min_avg_views}")
-        if exact_ratio is not None and exact_ratio < norm:
-            failures.append(f"Просмотры/подписчики ниже {norm:g}%")
     if days_since is None:
         uncertain.append("Не распознана дата последнего поста")
     elif settings.max_gap_days < days_since <= settings.abandoned_days:
@@ -232,19 +232,18 @@ def parse_channel_html(html, username, settings=None, now=None):
     return row
 
 
-def reassess_metrics(row, settings):
+def reassess_metrics(row, settings, now=None):
     """Reapply changed filters to cached metrics without another HTTP request."""
-    if row.get("metric_status", row.get("status")) == "error" or "eligible_posts" not in row:
+    if row.get("metric_status", row.get("status")) == "error":
         return row
     row = dict(row)
-    failures, uncertain = [], []
+    failures, uncertain = assess_post_views(row, settings)
     subs = row.get("subs")
     mean_views = row.get("avg_views_exact", row.get("avg_views"))
-    ratio = row.get("view_ratio_exact", row.get("view_ratio"))
-    norm = 15.0 if subs is not None and subs < 5000 else 10.0
+    norm = float(settings.min_post_view_ratio)
     row["norm"] = norm
     last = utc_date(row.get("last_post"))
-    days = (datetime.now(timezone.utc) - last).total_seconds() / 86400 if last else None
+    days = ((now or datetime.now(timezone.utc)) - last).total_seconds() / 86400 if last else None
     if days is not None:
         row["days_since_last"] = round(days, 2)
     if subs is None:
@@ -252,12 +251,10 @@ def reassess_metrics(row, settings):
     elif not settings.min_subs <= subs <= settings.max_subs:
         failures.append("Подписчики вне выбранного диапазона")
     if row.get("eligible_posts", 0) < settings.min_posts or mean_views is None:
-        uncertain.append("Мало зрелых постов для расчёта просмотров")
+        uncertain.append("Мало постов с просмотрами для расчёта среднего")
     else:
         if mean_views < settings.min_avg_views:
             failures.append("Средние просмотры ниже выбранного порога")
-        if ratio is not None and ratio < norm:
-            failures.append(f"Просмотры/подписчики ниже {norm:g}%")
     if days is None or days < 0:
         uncertain.append("Дата последнего поста не подтверждена")
     elif days > settings.abandoned_days:

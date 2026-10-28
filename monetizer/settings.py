@@ -15,7 +15,10 @@ class Settings:
     target_count: int = 30
     posts_limit: int = 15
     min_posts: int = 5
-    mature_hours: int = 24
+    mature_hours: int = 24  # Legacy checkpoint field; no longer a minimum age.
+    target_post_age_hours: int = 24
+    post_age_tolerance_hours: int = 6
+    min_post_view_ratio: float = 10.0
     max_gap_days: float = 4.0
     abandoned_days: int = 14
     workers: int = 4
@@ -63,6 +66,12 @@ class Settings:
     ai_prompt_bytes: int = 96000
 
     def __post_init__(self):
+        if type(self.target_post_age_hours) is not int or not 1 <= self.target_post_age_hours <= 168:
+            raise ValueError('Возраст поста для оценки активности: 1–168 часов')
+        if type(self.post_age_tolerance_hours) is not int or not 0 <= self.post_age_tolerance_hours <= self.target_post_age_hours:
+            raise ValueError('Отклонение возраста: от 0 до целевого возраста поста')
+        if type(self.min_post_view_ratio) not in (int, float) or not 0 < self.min_post_view_ratio <= 100:
+            raise ValueError('Порог просмотров поста: больше 0 и не более 100% подписчиков')
         validate_profile_id(self.tgstat_profile_id)
         if type(self.tgstat_auto_switch) is not bool:
             raise ValueError('Автопереключение профилей TGStat должно быть флагом')

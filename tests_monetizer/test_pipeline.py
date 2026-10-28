@@ -51,7 +51,7 @@ class PipelineTests(unittest.TestCase):
         def audit(name):
             row = expert(name)
             if name == "bad_blog":
-                row.update(status="rejected", reasons="Просмотры ниже порога")
+                row.update(status="rejected", reasons="Просмотры ниже порога", avg_views=100, avg_views_exact=100)
             return row
         runner = self.run_job({("moушн", 0): {"usernames": ["bad_blog", "good_blog"], "exhausted": False},
                                ("moушн", 1): {"usernames": ["other_good"], "exhausted": True}}, audit)
