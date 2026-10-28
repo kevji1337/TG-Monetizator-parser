@@ -12,6 +12,7 @@ from .ai_responses import latest_response
 from .ui_quality import quality_panel
 from .preferences import Preferences, PersistentUI
 from .ui_candidates import candidate_card, contact_plan_editor, contact_plan_panel
+from .ui_tables import workspace_columns
 
 
 def assessment_stale(row):
@@ -117,7 +118,8 @@ def database_panel(runner, running):
                                "Отбор": '⏳ Оценка устарела' if assessment_stale(r) else r.get("verdict"),
                                "Тип": TYPE_LABELS.get(r.get('channel_type'), 'Не установлено'),
                                "Работа": WORK_STATUSES[r["work_status"]], "Следующий контакт": r.get('next_contact_date', ''),
-                               "Действие": r.get('next_action_label', ''), "Заметка": r["notes"]} for r in visible]), hide_index=True, width="stretch")
+                               "Действие": r.get('next_action_label', ''), "Заметка": r["notes"]} for r in visible]), hide_index=True, width="stretch",
+                 column_config=workspace_columns(), row_height=38)
     if not visible:
         return
     username = st.selectbox("Карточка кандидата", [r["username"] for r in visible])
@@ -170,7 +172,8 @@ def history_panel(runner, running):
     run_id = st.selectbox("Предыдущий запуск", list(labels), format_func=labels.get)
     state = runner.repo.load_run(run_id)
     st.caption(f"Каналов: {len(state['rows'])}; причина завершения: {state.get('stop_reason', state.get('stage', ''))}")
-    st.dataframe(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"), "Вердикт": r.get("verdict")} for r in state["rows"]]), hide_index=True, width="stretch")
+    st.dataframe(pd.DataFrame([{"Канал": r["username"], "Название": r.get("title"), "Вердикт": r.get("verdict")} for r in state["rows"]]), hide_index=True, width="stretch",
+                 column_config=workspace_columns(), row_height=38)
     c1, c2 = st.columns(2)
     c1.download_button("CSV предыдущего запуска", csv_bytes(state["rows"]), f"history_{run_id}.csv", mime="text/csv")
     c2.download_button("Excel предыдущего запуска", xlsx_bytes(state["rows"]), f"history_{run_id}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

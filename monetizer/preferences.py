@@ -144,11 +144,12 @@ def last_run_preferences(state):
 class PersistentUI:
     KINDS = {'checkbox', 'text_input', 'text_area', 'number_input', 'slider', 'selectbox', 'multiselect', 'radio'}
 
-    def __init__(self, preferences, target=None):
+    def __init__(self, preferences, target=None, disabled=False):
         self.preferences, self.target = preferences, st if target is None else target
+        self.disabled = disabled
 
     def on(self, target):
-        return PersistentUI(self.preferences, target)
+        return PersistentUI(self.preferences, target, disabled=self.disabled)
 
     def __getattr__(self, kind):
         if kind not in self.KINDS:
@@ -206,6 +207,7 @@ class PersistentUI:
     def _render(self, kind, label, *args, **kwargs):
         method = getattr(self.target, kind)
         call = dict(inspect.signature(method).bind(label, *args, **kwargs).arguments)
+        call['disabled'] = self.disabled or call.get('disabled', False)
         key = call.setdefault('key', widget_key(kind, label))
         if key == 'proxy_api_key':
             raise ValueError('Для API-ключа используйте отдельное защищённое поле')
@@ -231,7 +233,7 @@ class PersistentUI:
         return value
 
 
-def api_key_field(preferences):
+def api_key_field(preferences, disabled=False):
     key = 'proxy_api_key'
     if key not in st.session_state:
         try:
@@ -245,7 +247,7 @@ def api_key_field(preferences):
             st.session_state['_saved_key_fingerprint'] = hashlib.sha256(st.session_state.get(key, '').encode()).hexdigest()
         except (OSError, ValueError, sqlite3.Error):
             st.warning('Ключ действует в текущей сессии, но зашифрованное сохранение не удалось.')
-    result = st.text_input('API-ключ прокси', type='password', key=key, on_change=changed,
+    result = st.text_input('API-ключ прокси', type='password', key=key, on_change=changed, disabled=disabled,
                            help='Автоматически сохраняется через Windows DPAPI. Очистите поле, чтобы удалить сохранённый ключ.')
     # Capture an existing session's key once when upgrading from the previous UI.
     fingerprint = hashlib.sha256(result.encode()).hexdigest()

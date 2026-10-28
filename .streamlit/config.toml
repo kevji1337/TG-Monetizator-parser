@@ -5,3 +5,21 @@ folderWatchBlacklist = [".venv", "venv", ".git", "results", "reports", "sessions
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#55CBBB"
+backgroundColor = "#10141D"
+secondaryBackgroundColor = "#202A3A"
+textColor = "#E4EBF5"
+borderColor = "#344256"
+dataframeBorderColor = "#2B384C"
+dataframeHeaderBackgroundColor = "#202D40"
+baseRadius = "0.625rem"
+buttonRadius = "0.625rem"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#171E2B"
+secondaryBackgroundColor = "#202A3A"

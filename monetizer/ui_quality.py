@@ -8,7 +8,7 @@ from .evaluation import review_set, validate_labels, save_labels, evaluate
 from .qualification import TYPE_LABELS
 
 
-def profile_panel(repo):
+def profile_panel(repo, disabled=False):
     profile = load_profile(repo)
     def save_field(field, widget_key):
         try:
@@ -23,9 +23,9 @@ def profile_panel(repo):
         for key, label in [('name', 'Имя отправителя'), ('role', 'Ваша роль'), ('services', 'Какие задачи берёте'),
                            ('verified_facts', 'Подтверждённый опыт и кейсы'), ('terms', 'Условия партнёрства, если определены')]:
             widget_key = 'sender_profile_' + key
-            options = dict(key=widget_key, on_change=save_field, args=(key, widget_key), max_chars=FIELDS[key])
+            options = dict(key=widget_key, on_change=save_field, args=(key, widget_key), max_chars=FIELDS[key], disabled=disabled)
             fields[key] = st.text_area(label, profile[key], height=70, **options) if key not in ('name', 'role') else st.text_input(label, profile[key], **options)
-        if st.button('Сохранить профиль отправителя'):
+        if st.button('Сохранить профиль отправителя', disabled=disabled):
             try:
                 profile = save_profile(repo, fields)
                 st.success('Профиль сохранён.')

@@ -31,10 +31,13 @@ from monetizer.ui_tgstat_profiles import profile_picker, profile_manager
 from monetizer.tgstat_profiles import TGStatProfiles
 from monetizer.runtime import acquire_runner
 from monetizer.ui_navigation import sidebar_navigation
+from monetizer.ui_style import apply_style
+from monetizer.ui_tables import COMPACT_COLUMNS, candidate_columns, workspace_columns, search_locked
 
 PAGE_STARTED = time.perf_counter()
 
 st.set_page_config(page_title="Монетизатор · Telegram", page_icon="🔎", layout="wide", initial_sidebar_state='expanded')
+apply_style()
 
 
 def get_runner():
@@ -47,8 +50,16 @@ def downloads(rows):
 
 
 runner = get_runner()
-preferences = Preferences(runner.repo, last_run_preferences(runner.state))
+run_snapshot = runner.snapshot()
+search_busy = search_locked(run_snapshot)
+preferences = Preferences(runner.repo, last_run_preferences(run_snapshot))
+if search_busy:
+    # Show the actual immutable run conditions, rather than next-run draft edits.
+    for key, value in last_run_preferences(run_snapshot).items():
+        if value is not None and st.session_state.get(key) != value:
+            st.session_state[key] = value
 ui = PersistentUI(preferences)
+search_ui = PersistentUI(preferences, disabled=search_busy)
 section = sidebar_navigation(ui)
 st.title("Монетизатор трафика")
 st.caption("Поиск публичных Telegram-каналов экспертов · аудит просмотров · черновики предложений")
@@ -61,14 +72,14 @@ with st.sidebar:
     advanced_connections = st.container()
     with advanced_connections:
         with st.expander('AI-аудит Gemini', expanded=False):
-            ai_enabled = ui.checkbox('Анализировать посты через Gemini', value=True)
-            ai_key = api_key_field(preferences)
-            ai_base_url = ui.text_input('Base URL AI', value=AI_BASE_URL)
-            ai_model = ui.text_input('Model ID', value=AI_MODEL)
-            ai_max_audits = ui.number_input('Максимум запросов AI за запуск', 1, 5, 5)
-            ai_timeout = ui.number_input('Таймаут AI, секунд', 10, 900, 600, step=10,
+            ai_enabled = search_ui.checkbox('Анализировать посты через Gemini', value=True)
+            ai_key = api_key_field(preferences, disabled=search_busy)
+            ai_base_url = search_ui.text_input('Base URL AI', value=AI_BASE_URL)
+            ai_model = search_ui.text_input('Model ID', value=AI_MODEL)
+            ai_max_audits = search_ui.number_input('Максимум запросов AI за запуск', 1, 5, 5)
+            ai_timeout = search_ui.number_input('Таймаут AI, секунд', 10, 900, 600, step=10,
                                          help='Общий срок ожидания, включая запуск ответа и reasoning. Подключение ограничено отдельно: 5 секунд.')
-            ai_prompt_bytes = ui.number_input('Лимит текста AI-запроса, байт UTF-8', 16000, 120000, 96000, step=4000)
+            ai_prompt_bytes = search_ui.number_input('Лимит текста AI-запроса, байт UTF-8', 16000, 120000, 96000, step=4000)
             st.caption('Через ваш gemini-web2api-go. Отправляются публичные посты, описание и профиль отправителя. '
                        'Один запрос за раз; ошибки тоже расходуют лимит. Кэш действует 24 часа.')
             st.caption('Streaming показывает ожидание, получение reasoning и итогового ответа. Текст reasoning не сохраняется. '
@@ -78,7 +89,7 @@ with st.sidebar:
                            'web2api увеличьте его до 600 с. Прежнее значение не меняется автоматически.')
             connection_key = (ai_key or os.environ.get('MONETIZER_AI_KEY', '')).strip()
             connection_signature = hashlib.sha256((ai_base_url + '\0' + connection_key).encode()).hexdigest()
-            if st.button('Проверить web2api — без генерации', disabled=runner.snapshot()['status'] in ('running', 'stopping')):
+            if st.button('Проверить web2api — без генерации', disabled=search_busy):
                 try:
                     with st.spinner('Проверяю версию и список моделей, без AI-аудита…'):
                         connection_info = inspect_proxy(ai_base_url, connection_key)
@@ -104,20 +115,20 @@ with st.sidebar:
                          ai_timeout=ai_timeout, ai_prompt_bytes=ai_prompt_bytes)
         st.caption('Настройки сохраняются автоматически. Текстовые поля — после Enter или выхода из поля.')
         with st.expander('Режим разработки'):
-            dev_mode = ui.checkbox('Dev-режим', value=os.environ.get('MONETIZER_DEV') == '1')
-            keep_browser = ui.checkbox('Оставлять Chrome открытым при ошибке', value=True)
-            browser_wait = ui.number_input('Ожидание ручного входа, секунд', 0, 1800, 300, step=30)
-        sender_profile = profile_panel(runner.repo)
+            dev_mode = search_ui.checkbox('Dev-режим', value=os.environ.get('MONETIZER_DEV') == '1')
+            keep_browser = search_ui.checkbox('Оставлять Chrome открытым при ошибке', value=True)
+            browser_wait = search_ui.number_input('Ожидание ручного входа, секунд', 0, 1800, 300, step=30)
+        sender_profile = profile_panel(runner.repo, disabled=search_busy)
     with primary_settings:
         st.subheader("Новый поиск")
-        mode = ui.radio("Источник", ["TGStat — каталог тематик", "Список каналов — только аудит"])
-        tgstat_profile_id, tgstat_auto_switch = profile_picker(runner, ui) if mode.startswith('TGStat') else ('default', False)
+        mode = search_ui.radio("Источник", ["TGStat — каталог тематик", "Список каналов — только аудит"])
+        tgstat_profile_id, tgstat_auto_switch = profile_picker(runner, search_ui) if mode.startswith('TGStat') else ('default', False)
         snapshot = load_categories()
         labels = {c['id']: c['title'] for c in snapshot['categories']}
         previous = st.session_state.get('tgstat_category_ids')
         if previous is not None and any(c not in labels for c in previous):
             st.session_state['tgstat_category_ids'] = [c for c in previous if c in labels]
-        category_ids = ui.multiselect('Тематики TGStat', list(labels), default=['34'] if '34' in labels else [],
+        category_ids = search_ui.multiselect('Тематики TGStat', list(labels), default=['34'] if '34' in labels else [],
                                       format_func=labels.get, key='tgstat_category_ids',
                                       placeholder='Выберите одну или несколько тематик')
         topic = '; '.join(labels[c] for c in category_ids)
@@ -128,7 +139,7 @@ with st.sidebar:
             with st.expander('Список тематик'):
                 st.caption(f"Тематик: {len(labels)}. Список прочитан с TGStat: {snapshot['observed_at'][:10]}.")
                 st.caption('При поиске ID проверяется по форме сайта. Обновление списка открывает Chrome только по этой кнопке.')
-                if st.button('Обновить тематики с TGStat', disabled=runner.snapshot()['status'] in ('running', 'stopping')):
+                if st.button('Обновить тематики с TGStat', disabled=search_busy):
                     try:
                         with st.spinner('Читаю список тематик TGStat в Chrome…'):
                             refresh_categories(Settings(dev_mode=dev_mode, keep_browser_on_error=keep_browser,
@@ -138,62 +149,69 @@ with st.sidebar:
                         st.error(f'Не удалось обновить тематики: {exc}')
                         st.caption('Полная ошибка сохранена в разделе «Dev-диагностика». Сохранённый список тематик остаётся доступным.')
         else:
-            channels_text = ui.text_area("@username или ссылки t.me — по одному на строку", height=150)
-        count = ui.number_input("Цель: подходящих каналов", 1, 1000, 30, step=1)
-        new_only = ui.checkbox("Искать только новые каналы", value=True, disabled=not mode.startswith("TGStat"))
-        login_pause = ui.checkbox("Дать минуту на ручной вход в TGStat", disabled=not mode.startswith("TGStat"))
+            channels_text = search_ui.text_area("@username или ссылки t.me — по одному на строку", height=150)
+        count = search_ui.number_input("Цель: подходящих каналов", 1, 1000, 30, step=1)
+        new_only = search_ui.checkbox("Искать только новые каналы", value=True, disabled=not mode.startswith("TGStat"))
+        login_pause = search_ui.checkbox("Дать минуту на ручной вход в TGStat", disabled=not mode.startswith("TGStat"))
     with advanced_filters:
         with st.expander('Фокус аудита — необязательно'):
             st.caption('Это дополнительный отбор по содержанию после сбора. Он не меняет тематику TGStat и не отправляет слова в поиск.')
             profiles = assessment_profiles(category_ids) if category_ids else list(MICRO_NICHES.values())
-            micro_id = ui.selectbox('Проверять конкретную специализацию', [''] + [m['id'] for m in profiles],
+            micro_id = search_ui.selectbox('Проверять конкретную специализацию', [''] + [m['id'] for m in profiles],
                                     format_func=lambda value: MICRO_NICHES[value]['title'] if value else 'Все специализации выбранных тематик')
         with st.expander('Фильтры TGStat', expanded=False):
             st.caption('Применяются при поиске на TGStat. Для готового списка каналов работают критерии аудита ниже.')
             country_labels = {c['id']: c['title'] for c in snapshot['countries']}
             language_labels = {c['id']: c['title'] for c in snapshot['languages']}
-            countries = ui.multiselect('Страна канала', list(country_labels), format_func=country_labels.get,
+            countries = search_ui.multiselect('Страна канала', list(country_labels), format_func=country_labels.get,
                                        placeholder='Любая страна')
-            languages = ui.multiselect('Язык канала', list(language_labels), default=['3'] if '3' in language_labels else [], format_func=language_labels.get,
+            languages = search_ui.multiselect('Язык канала', list(language_labels), default=['3'] if '3' in language_labels else [], format_func=language_labels.get,
                                        placeholder='Любой язык')
             channel_types = {'': 'Любой', 'public': 'Публичный', 'private': 'Приватный'}
-            channel_type = ui.selectbox('Тип канала', list(channel_types), format_func=channel_types.get)
-            age = ui.slider('Возраст канала, месяцев', 0, 120, (12, 120))
-            err = ui.slider('Уровень вовлечённости ERR, %', 0, 100, (10, 100))
+            channel_type = search_ui.selectbox('Тип канала', list(channel_types), format_func=channel_types.get)
+            age = search_ui.slider('Возраст канала, месяцев', 0, 120, (12, 120))
+            err = search_ui.slider('Уровень вовлечённости ERR, %', 0, 100, (10, 100))
             st.caption('Крайние значения 120 месяцев и 100% — это 120+ и 100+ в форме TGStat, без верхнего ограничения.')
-            er = ui.slider('Уровень вовлечённости ER от, %', 0.0, 10.0, 0.0, step=.5)
-            male = ui.slider('Мужская аудитория от, %', 0, 90, 0, step=5)
-            female = ui.slider('Женская аудитория от, %', 0, 90, 0, step=5)
-            min_subs = ui.number_input("Подписчики от", 1, 100_000_000, 3000)
-            max_subs = ui.number_input("Подписчики до", 1, 100_000_000, 30000)
-            tgstat_views_from = ui.number_input('Средний охват поста TGStat от', min_value=0, value=None, placeholder='Без ограничения')
-            tgstat_views_to = ui.number_input('Средний охват поста TGStat до', min_value=0, value=None, placeholder='Без ограничения')
-            daily = ui.number_input('Средний охват поста за 24 часа от', 0, 10_000_000, 300)
-            daily_to = ui.number_input('Средний охват поста за 24 часа до', min_value=0, value=None, placeholder='Без ограничения')
-            ci_from = ui.number_input('Индекс цитирования от', min_value=0.0, value=None, step=.1, placeholder='Без ограничения')
-            ci_to = ui.number_input('Индекс цитирования до', min_value=0.0, value=None, step=.1, placeholder='Без ограничения')
-            exclude_dead = ui.checkbox('Скрыть мёртвые каналы', value=True)
-            exclude_scam = ui.checkbox('Без SCAM/FAKE', value=True)
-            exclude_red = ui.checkbox('Без красной метки', value=True)
+            er = search_ui.slider('Уровень вовлечённости ER от, %', 0.0, 10.0, 0.0, step=.5)
+            male = search_ui.slider('Мужская аудитория от, %', 0, 90, 0, step=5)
+            female = search_ui.slider('Женская аудитория от, %', 0, 90, 0, step=5)
+            min_subs = search_ui.number_input("Подписчики от", 1, 100_000_000, 3000)
+            max_subs = search_ui.number_input("Подписчики до", 1, 100_000_000, 30000)
+            tgstat_views_from = search_ui.number_input('Средний охват поста TGStat от', min_value=0, value=None, placeholder='Без ограничения')
+            tgstat_views_to = search_ui.number_input('Средний охват поста TGStat до', min_value=0, value=None, placeholder='Без ограничения')
+            daily = search_ui.number_input('Средний охват поста за 24 часа от', 0, 10_000_000, 300)
+            daily_to = search_ui.number_input('Средний охват поста за 24 часа до', min_value=0, value=None, placeholder='Без ограничения')
+            ci_from = search_ui.number_input('Индекс цитирования от', min_value=0.0, value=None, step=.1, placeholder='Без ограничения')
+            ci_to = search_ui.number_input('Индекс цитирования до', min_value=0.0, value=None, step=.1, placeholder='Без ограничения')
+            exclude_dead = search_ui.checkbox('Скрыть мёртвые каналы', value=True)
+            exclude_scam = search_ui.checkbox('Без SCAM/FAKE', value=True)
+            exclude_red = search_ui.checkbox('Без красной метки', value=True)
             st.caption('Приватные каналы без публичного username или превью t.me/s нельзя проверить этим аудитором.')
         with st.expander("Критерии и скорость"):
             st.caption('Дополнительные критерии аудита публичного превью; они отделены от фильтров поиска TGStat.')
-            avg_ratio = ui.number_input('Средние просмотры от подписчиков, %', 0.0, 100.0, 10.0, step=0.5,
+            avg_ratio = search_ui.number_input('Средние просмотры от подписчиков, %', 0.0, 100.0, 10.0, step=0.5,
                                         help='Средние просмотры постов / число подписчиков × 100. Например, 10% при 5000 подписчиков — 500 просмотров в среднем. 0 отключает этот порог.')
-            post_age = ui.number_input('Возраст поста для оценки активности, часов', 1, 168, 24,
+            post_age = search_ui.number_input('Возраст поста для оценки активности, часов', 1, 168, 24,
                                        help='Берётся пост, ближайший к этому возрасту, в пределах допустимого отклонения.')
-            post_tolerance = ui.number_input('Допустимое отклонение возраста, часов', 0, post_age, min(6, post_age))
-            post_ratio = ui.number_input('Просмотры поста от подписчиков, %', 0.1, 100.0, 10.0, step=0.5)
+            post_tolerance = search_ui.number_input('Допустимое отклонение возраста, часов', 0, post_age, min(6, post_age))
+            post_ratio = search_ui.number_input('Просмотры поста от подписчиков, %', 0.1, 100.0, 10.0, step=0.5)
             st.caption(f'Берётся ближайший к {post_age} ч пост возрастом {post_age - post_tolerance}–{post_age + post_tolerance} ч. '
                        f'Порог: {post_ratio:g}% подписчиков. При 5000 подписчиков и 10% нужно 500 просмотров.')
-            gap = ui.number_input("Максимальный интервал публикаций, дней", 1.0, 14.0, 4.0, step=.5)
-            workers = ui.slider("Параллельных аудитов", 1, 8, 4)
-            rate = ui.slider("Запросов к Telegram в секунду", .5, 5.0, 2.0, step=.5)
-            audit_budget = ui.number_input("Максимум аудитов: 0 = десять целей", 0, 10000, 0, step=10)
-            time_limit = ui.number_input("Лимит времени, минут", 1.0, 1440.0, 60.0)
+            gap = search_ui.number_input("Максимальный интервал публикаций, дней", 1.0, 14.0, 4.0, step=.5)
+            workers = search_ui.slider("Параллельных аудитов", 1, 8, 4)
+            rate = search_ui.slider("Запросов к Telegram в секунду", .5, 5.0, 2.0, step=.5)
+            audit_budget = search_ui.number_input("Максимум аудитов: 0 = десять целей", 0, 10000, 0, step=10)
+            time_limit = search_ui.number_input("Лимит времени, минут", 1.0, 1440.0, 60.0)
     with start_actions:
+        bounds = [(min_subs, max_subs, 'подписчики'), (tgstat_views_from, tgstat_views_to, 'охват поста TGStat'),
+                  (daily, daily_to, 'охват за 24 часа'), (ci_from, ci_to, 'индекс цитирования')]
+        invalid_bounds = [label for lower, upper, label in bounds if lower is not None and upper is not None and lower > upper]
+        if invalid_bounds:
+            st.warning('Минимум больше максимума: ' + ', '.join(invalid_bounds) + '.')
+        if search_busy:
+            st.info('Поиск идёт. Категории и условия зафиксированы. Чтобы изменить их, остановите запуск и начните новый поиск. Просмотр результатов доступен.')
         if st.button("Начать поиск и аудит" if mode.startswith("TGStat") else "Начать аудит", type="primary", width="stretch",
-                     disabled=mode.startswith('TGStat') and not TGStatProfiles(runner.repo).list()):
+                     disabled=search_busy or bool(invalid_bounds) or (mode.startswith('TGStat') and not TGStatProfiles(runner.repo).list())):
             try:
                 settings = Settings(min_subs=min_subs, max_subs=max_subs, min_daily_reach=daily,
                                     min_avg_views=0, min_avg_view_ratio=avg_ratio, target_count=count, target_post_age_hours=post_age,
@@ -229,6 +247,8 @@ with st.sidebar:
 @st.fragment(run_every="2s")
 def results_panel():
     state = runner.snapshot()
+    if search_locked(state) != search_busy:
+        st.rerun()  # Unlock the sidebar when the background job finishes.
     running = state["status"] in ("running", "stopping")
     count_found, rows = len(state["candidates"]), sorted_rows(state["rows"])
     green = sum(not r.get('assessment_stale') and r.get("status") in ("top", "recommended") for r in rows)
@@ -310,6 +330,7 @@ def results_panel():
             runner.stop()
             st.rerun()
     elif state["status"] in ("cancelled", "interrupted", "failed", "partial"):
+        st.caption('Продолжение сохраняет категории и фильтры прежнего запуска. Для другого набора тематик начните новый поиск слева.')
         if state.get('settings', {}).get('search_mode', 'keywords') == 'keywords' and not state.get('manual'):
             st.info('Сохранён прежний поиск по словам. Его продолжение сохранит прежний способ поиска. Для поиска по тематикам начните новый запуск слева.')
         if st.button("Продолжить сохранённый запуск"):
@@ -376,7 +397,8 @@ def results_panel():
             st.dataframe(pd.DataFrame([{'Канал': row['username'], 'Название': row.get('title'),
                                         'Приоритет': ai_priority(row)['ai_priority_score'],
                                         'Почему': ai_priority(row)['ai_priority_reason']} for row in waiting_rows[:15]],
-                                      columns=['Канал', 'Название', 'Приоритет', 'Почему']), hide_index=True, width='stretch')
+                                      columns=['Канал', 'Название', 'Приоритет', 'Почему']), hide_index=True, width='stretch',
+                         column_config=workspace_columns(), row_height=38)
     reason_filter = ui.multiselect('Отбор по главной причине', list(BUCKETS), format_func=BUCKETS.get,
                                    placeholder='Все причины')
     if 'non_target' in reason_filter:
@@ -400,12 +422,15 @@ def results_panel():
         visible.insert(2, 'ai_audit_status')
         visible.insert(3, 'ai_priority_score')
     visible += ['next_contact_date', 'next_action_label']
+    table_mode = ui.radio('Вид таблицы', ['Компактный', 'Подробный'], horizontal=True)
     frame = pd.DataFrame([{COLUMNS[k]: '⏳ Оценка устарела' if k == 'verdict' and r.get('assessment_stale') else
                            STATUS_LABELS.get(r.get(k), '') if k == 'ai_audit_status' else
                            TYPE_LABELS.get(r.get(k), 'Не установлено') if k == 'channel_type' else r.get(k)
                            for k in visible} for r in selected], columns=[COLUMNS[k] for k in visible])
-    st.dataframe(frame, hide_index=True, width="stretch",
-                 column_config={COLUMNS[k]: st.column_config.LinkColumn(COLUMNS[k]) for k in ("link", "youtube", "instagram", 'activity_post_url')})
+    table_columns = [COLUMNS[k] for k in COMPACT_COLUMNS if k in visible] if table_mode == 'Компактный' else list(frame.columns)
+    st.dataframe(frame, hide_index=True, width="stretch", height=min(570, max(150, 42 + len(frame) * 38)), row_height=38,
+                 column_order=table_columns,
+                 column_config=candidate_columns(state.get('settings', {}).get('target_post_age_hours', 24)))
     if selected:
         csv_data, xlsx_data = downloads(selected)
         filename = f"Монетизация_{state.get('run_id', 'каналы')[:12]}"

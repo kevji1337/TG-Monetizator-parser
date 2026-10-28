@@ -9,6 +9,7 @@ from .contact_plans import ACTIONS
 from .qualification import TYPE_LABELS
 from .repository import WORK_STATUSES
 from .preferences import PersistentUI, Preferences
+from .ui_tables import workspace_columns
 
 RELEVANCE = {'matched': 'Соответствует теме', 'mismatch': 'Другая тема', 'unknown': 'Тема требует проверки'}
 
@@ -138,7 +139,8 @@ def contact_plan_panel(runner, running):
     st.dataframe(pd.DataFrame([{'Срок': row.get('contact_plan_state'), 'Дата': row.get('next_contact_date'),
                                 'Действие': row.get('next_action_label'), 'Канал': row['username'],
                                 'Название': row.get('title'), 'Рабочий статус': row.get('work_status_label'),
-                                'Пояснение': row.get('contact_plan_note')} for row in selected]), hide_index=True, width='stretch')
+                                'Пояснение': row.get('contact_plan_note')} for row in selected]), hide_index=True, width='stretch',
+                 column_config=workspace_columns(), row_height=38)
     username = st.selectbox('Канал для следующего действия', [row['username'] for row in selected], key='contact_plan_channel')
     row = next(row for row in selected if row['username'] == username)
     candidate_card(row)

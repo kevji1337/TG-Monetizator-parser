@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -63,6 +64,61 @@ class InterfaceTests(unittest.TestCase):
         self.assertTrue(any('Стоматолог' in option or 'стоматолог' in option for option in focus.options))
         self.assertFalse(any('UX' in option or 'ландшафт' in option.casefold() for option in focus.options))
         self.assertEqual(len(app.exception), 0)
+
+    def test_running_search_locks_conditions_but_keeps_navigation_and_results_usable(self):
+        from monetizer.settings import Settings
+        from monetizer.preferences import Preferences
+        row = parse_channel_html(preview(), 'expert_blog', now=NOW)
+        self.runner.state.update(status='running', stage='Поиск', settings=Settings(search_mode='categories', category_ids=('34',)).to_dict(),
+                                 candidates={'expert_blog': []}, rows=[row])
+        Preferences(self.runner.repo).save('tgstat_category_ids', ['53'])
+        with patch.object(self.runner, 'start') as start, patch.object(self.runner, 'stop') as stop:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            self.assertEqual(len(app.exception), 0)
+            self.assertEqual(next(m for m in app.multiselect if m.label == 'Тематики TGStat').value, ['34'])
+            for kind in ('checkbox', 'number_input', 'multiselect', 'text_input', 'text_area', 'slider', 'selectbox'):
+                for widget in getattr(app.sidebar, kind):
+                    self.assertTrue(widget.disabled, widget.label)
+            self.assertTrue(next(b for b in app.button if b.label == 'Начать поиск и аудит').disabled)
+            self.assertFalse(next(b for b in app.sidebar.button if b.label == 'На главную — поиск').disabled)
+            self.assertFalse(next(c for c in app.checkbox if c.label == 'Только зелёные').disabled)
+            next(b for b in app.button if b.label == 'Остановить и сохранить прогресс').click().run()
+            stop.assert_called_once()
+            start.assert_not_called()
+            self.runner.state['status'] = 'completed'
+            app.run()
+            self.assertFalse(next(m for m in app.multiselect if m.label == 'Тематики TGStat').disabled)
+            self.assertEqual(len(app.exception), 0)
+
+    def test_compact_results_use_short_headers_narrow_priority_and_formatted_numbers(self):
+        from monetizer.settings import Settings
+        row = parse_channel_html(preview(), 'expert_blog', now=NOW)
+        row.update(ai_priority_score=60, ai_audit_status='queued')
+        self.runner.state.update(status='completed', stage='Готово', settings=Settings(ai_enabled=True).to_dict(),
+                                 candidates={'expert_blog': []}, rows=[row])
+        app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+        def table():
+            return next(t for t in app.dataframe if COLUMNS['activity_ratio'] in t.value.columns)
+        self.assertEqual(len(app.exception), 0)
+        config = json.loads(table().proto.columns)
+        self.assertEqual(config[COLUMNS['ai_priority_score']]['width'], 90)
+        self.assertEqual(config[COLUMNS['ai_priority_score']]['label'], 'Приоритет')
+        self.assertEqual(config[COLUMNS['activity_ratio']]['type_config']['format'], '%.1f%%')
+        self.assertNotIn(COLUMNS['median_views'], table().proto.column_order)
+        next(r for r in app.radio if r.label == 'Вид таблицы').set_value('Подробный').run()
+        self.assertIn(COLUMNS['median_views'], table().proto.column_order)
+        self.assertEqual(len(app.exception), 0)
+
+    def test_invalid_search_bounds_disable_start_until_corrected(self):
+        with patch.object(self.runner, 'start') as start:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(n for n in app.number_input if n.label == 'Подписчики от').set_value(40000).run()
+            self.assertTrue(next(b for b in app.button if b.label == 'Начать поиск и аудит').disabled)
+            self.assertTrue(any('Минимум больше максимума' in message.value for message in app.warning))
+            next(n for n in app.number_input if n.label == 'Подписчики до').set_value(50000).run()
+            self.assertFalse(next(b for b in app.button if b.label == 'Начать поиск и аудит').disabled)
+            start.assert_not_called()
+            self.assertEqual(len(app.exception), 0)
 
     def test_screenshot_defaults_and_edits_reach_runner(self):
         with patch.object(self.runner, 'start') as start:
