@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 
 from monetizer.audit import error_row, parse_channel_html
 from monetizer.runner import JobRunner
+from monetizer.export import COLUMNS
 from test_core import NOW, preview
 
 
@@ -16,12 +17,15 @@ class InterfaceTests(unittest.TestCase):
         st.cache_resource.clear()
         self.directory = tempfile.TemporaryDirectory()
         self.runner = JobRunner(Path(self.directory.name) / "checkpoint.json")
+        self.profile_root = patch('monetizer.tgstat_profiles.ROOT', Path(self.directory.name) / 'profiles')
+        self.profile_root.start()
         self.factory = patch("monetizer.runner.JobRunner", return_value=self.runner)
         self.factory.start()
         self.app_path = Path(__file__).resolve().parents[1] / "monetizer_app.py"
 
     def tearDown(self):
         self.factory.stop()
+        self.profile_root.stop()
         self.directory.cleanup()
         st.cache_resource.clear()
 
@@ -124,9 +128,19 @@ class InterfaceTests(unittest.TestCase):
                                  candidates={"expert_blog": [], "broken_blog": []}, rows=[row, error_row("broken_blog", "http_403", "HTTP 403")])
         app = AppTest.from_file(str(self.app_path)).run(timeout=15)
         self.assertEqual(len(app.exception), 0)
-        self.assertEqual(len(app.dataframe[0].value), 2)
+        def results():
+            # Summary tables precede results. Match the channel table by its
+            # columns so adding another summary cannot change what we assert.
+            expected = {COLUMNS[key] for key in ('username', 'verdict', 'link')}
+            tables = [table.value for table in app.dataframe if expected.issubset(table.value.columns)]
+            self.assertEqual(len(tables), 1, 'Expected exactly one channel results table')
+            return tables[0]
+
+        self.assertEqual(len(results()), 2)
+        self.assertEqual(set(results()[COLUMNS['username']]), {row['username'], '@broken_blog'})
         next(c for c in app.checkbox if c.label == "Только зелёные").check().run()
-        self.assertEqual(len(app.dataframe[0].value), 1)
+        self.assertEqual(len(results()), 1)
+        self.assertEqual(list(results()[COLUMNS['username']]), [row['username']])
         self.assertEqual(len(app.exception), 0)
         pitch = next(t for t in app.text_area if t.label.startswith("Черновик"))
         pitch.set_value("Проверенный текст предложения").run()
@@ -191,6 +205,44 @@ class InterfaceTests(unittest.TestCase):
             self.assertTrue(any(b.label == 'Скачать лог диагностики' for b in app.get('download_button')))
             browser.assert_not_called()
             network.assert_not_called()
+
+    def test_profile_manager_add_delete_restore_and_select_without_browser(self):
+        from monetizer.tgstat_profiles import TGStatProfiles
+        store = TGStatProfiles(self.runner.repo)
+        with patch('monetizer.ui_tgstat_profiles.open_for_login') as browser, \
+                patch.object(self.runner, 'start') as start:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(b for b in app.button if b.label == 'Управлять профилями').click().run()
+            self.assertEqual(next(r for r in app.radio if r.label == 'Раздел').value, 'Профили TGStat')
+            self.assertEqual(len(app.sidebar.dataframe), 0)
+            next(t for t in app.text_input if t.label == 'Название нового профиля').set_value('Тестовый аккаунт')
+            next(b for b in app.button if b.label == 'Добавить профиль').click().run()
+            created = next(row['id'] for row in store.list() if row['name'] == 'Тестовый аккаунт')
+            self.assertEqual(next(r for r in app.radio if r.label == 'Аккаунты TGStat').value, created)
+            next(b for b in app.button if b.label == 'Удалить профиль').click().run()
+            self.assertNotIn(created, [row['id'] for row in store.list()])
+            self.assertEqual(store.archived()[0]['id'], created)
+            next(b for b in app.button if b.key == 'restore_tgstat_' + created).click().run()
+            self.assertIn(created, [row['id'] for row in store.list()])
+            next(b for b in app.button if b.label == 'Использовать для поиска').click().run()
+            self.assertEqual(next(r for r in app.radio if r.label == 'Раздел').value, 'Поиск')
+            self.assertEqual(next(s for s in app.selectbox if s.label == 'Профиль TGStat').value, created)
+            self.assertEqual(len(app.exception), 0)
+            browser.assert_not_called()
+            start.assert_not_called()
+
+    def test_no_profiles_disables_search_and_allows_default_restore(self):
+        from monetizer.tgstat_profiles import TGStatProfiles
+        store = TGStatProfiles(self.runner.repo)
+        store.delete('default')
+        with patch('monetizer.ui_tgstat_profiles.open_for_login') as browser:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            self.assertTrue(next(b for b in app.button if b.label == 'Начать поиск и аудит').disabled)
+            next(b for b in app.button if b.label == 'Управлять профилями').click().run()
+            next(b for b in app.button if b.key == 'restore_tgstat_default').click().run()
+            self.assertEqual([row['id'] for row in store.list()], ['default'])
+            self.assertEqual(len(app.exception), 0)
+            browser.assert_not_called()
 
 
 if __name__ == "__main__":
