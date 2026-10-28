@@ -91,9 +91,20 @@ def retained_sessions(include_url=True):
 
 def close_retained(session_id):
     with _lock:
-        search = _retained.pop(session_id, None)
+        search = _retained.get(session_id)
     if search:
-        search.close(force=True)
+        result = search.close(force=True)
+        with _lock:
+            _retained.pop(session_id, None)
+        return result
+
+
+def check_retained_login(session_id):
+    with _lock:
+        search = _retained.get(session_id)
+    if search is None:
+        raise ValueError('Окно профиля уже закрыто')
+    return search.check_login()
 
 
 def log_tail(limit=24000):

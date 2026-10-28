@@ -1,15 +1,36 @@
 """Named local Chrome sessions, selected manually for each search."""
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import re
 import sqlite3
 from uuid import uuid4
+from .export import atomic_json
 
 DEFAULT_PROFILE = 'default'
 DEFAULT_NAME = 'Основной (прежний вход)'
 ROOT = Path(__file__).resolve().parents[1] / 'results' / 'monetizer'
 SCHEMA = '''CREATE TABLE IF NOT EXISTS tgstat_profiles(
     id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)'''
+AUTH_LABELS = {'authenticated': 'Вход виден на странице TGStat', 'not_authenticated': 'Требуется вход',
+               'unknown': 'Вход не подтверждён', 'not_checked': 'Вход ещё не проверен'}
+
+
+def session_state(profile_id):
+    validate_profile_id(profile_id)
+    folder = ROOT / 'chrome_profile' if profile_id == DEFAULT_PROFILE else ROOT / 'chrome_profiles' / profile_id
+    try:
+        data = json.loads((folder / 'session_state.json').read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def update_session_state(profile_id, **updates):
+    folder = profile_directory(profile_id)
+    data = session_state(profile_id)
+    data.update(updates)
+    atomic_json(folder / 'session_state.json', data)
 
 
 def validate_profile_id(value):
@@ -90,11 +111,16 @@ def open_for_login(profile_id, log=None):
                           log=log or (lambda message: logger().info('TGStat profile: %s', message)))
     try:
         search._open()
-        search.driver.get('https://tgstat.ru/channels/search')
         search.stage = 'manual_profile_login'
         search.purpose = 'profile_login'
         search.preserve_on_close = True
         retain(search)
+        from selenium.common.exceptions import TimeoutException
+        try:
+            search.driver.get('https://tgstat.ru/channels/search')
+        except TimeoutException:
+            search.log('TGStat загружается дольше обычного. Chrome оставлен открытым для ручного входа.')
+        search.check_login()
         return search.session_id
     except Exception:
         logger().exception('TGStat profile login failed profile=%s', profile_id)

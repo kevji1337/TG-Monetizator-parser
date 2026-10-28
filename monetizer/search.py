@@ -12,7 +12,8 @@ from .categories import (CACHE_PATH, category_key, category_id_from_key, validat
 from .export import atomic_json
 from .tgstat_filters import filter_spec
 from .diagnostics import diagnosed, logger, safe_url, retain, retained_sessions, BrowserControl
-from .tgstat_profiles import profile_directory, ROOT as PROFILE_ROOT
+from .tgstat_profiles import profile_directory, update_session_state, session_state, ROOT as PROFILE_ROOT
+from .browser_session import configure_session_restore, graceful_quit, login_state, BrowserExit, BrowserStillRunning
 
 
 class RetryAfterLogin(Exception):
@@ -28,6 +29,7 @@ class TGStatSearch:
         self.settings, self.stop, self.log = settings, stop or threading.Event(), log
         self.deadline, self.driver = deadline, None
         self._chrome_guard = None
+        self._lifecycle_lock = threading.RLock()
         self.current_query, self.current_page = None, -1
         self.applied_filters = None
         self._unavailable_urls = set()
@@ -92,10 +94,21 @@ class TGStatSearch:
         import undetected_chromedriver as uc
         from .browser import prepare_driver
         class QuietChrome(uc.Chrome):
+            def quit(self):
+                graceful_quit(self)
+
             def __del__(self):
                 try:
-                    super().__del__()
-                except OSError:
+                    self.quit()
+                except Exception:
+                    pass
+
+            @classmethod
+            def _ensure_close(cls, instance):
+                # UC's finalizer otherwise kills the driver before Chrome flushes.
+                try:
+                    instance.quit()
+                except Exception:
                     pass
         self._check()
         browser_path = uc.find_chrome_executable()
@@ -107,10 +120,32 @@ class TGStatSearch:
         options = uc.ChromeOptions()
         options.add_argument("--start-maximized")
         options.add_argument("--no-first-run")
+        options.add_argument('--profile-directory=Default')
+        saved = session_state(self.settings.tgstat_profile_id)
+        pid = saved.get('browser_pid')
+        if saved.get('close_status') == 'open' and type(pid) is int and pid > 0:
+            watcher = BrowserExit(pid)
+            try:
+                if not watcher.wait(0):
+                    raise BrowserStillRunning('Предыдущее окно этого профиля Chrome ещё работает. Закройте его вручную '
+                                              'перед повторным открытием; настройки профиля не изменены.')
+            finally:
+                watcher.close()
+        configure_session_restore(profile)
         logger().info('session=%s TGStat profile=%s', self.session_id, self.settings.tgstat_profile_id)
         self.log("Открываю Chrome для TGStat; при необходимости пройдите проверку в его окне.")
         self.driver = QuietChrome(options=options, user_data_dir=str(profile), driver_executable_path=driver_path,
                                   browser_executable_path=browser_path, version_main=major)
+        self.driver._monetizer_persistent = True
+        actual_profile = self.driver.capabilities.get('chrome', {}).get('userDataDir')
+        if isinstance(actual_profile, str):
+            from pathlib import Path
+            if Path(actual_profile).resolve() != profile.resolve():
+                raise RuntimeError('Chrome открыл другую папку профиля. Поиск остановлен; вход в выбранный профиль не изменён.')
+        logger().info('session=%s persistent Chrome profile=%s restore_session=enabled', self.session_id, profile)
+        self._save_session_state(auth_status='unknown', auth_reason='Вход после открытия ещё не проверен',
+                                 opened_at=datetime.now(timezone.utc).isoformat(), close_status='open', restore_enabled=True,
+                                 browser_pid=self.driver.browser_pid)
         self.driver.set_page_load_timeout(35)
         self._progress('Chrome открыт. Перехожу к TGStat.')
         if self.settings.login_wait_seconds:
@@ -139,7 +174,10 @@ class TGStatSearch:
         logger().info('session=%s AJAX http=%s status=%s', self.session_id, response.get('http'), response.get('status'))
         restricted = (response['http'] == 200 and response.get('status') == 'restricted') or response['http'] == 401
         if restricted:
-            self.last_restriction = 'HTTP 401: требуется вход' if response['http'] == 401 else 'TGStat: restricted (требуется вход или достигнут лимит доступа)'
+            auth = self.check_login()
+            self.last_restriction = ('Требуется вход в TGStat' if response['http'] == 401 or auth['auth_status'] == 'not_authenticated'
+                                     else 'TGStat: restricted; вход виден, но доступ к выдаче ограничен' if auth['auth_status'] == 'authenticated'
+                                     else 'TGStat: restricted; вход не подтверждён, возможен лимит доступа')
             self.preserve_on_close = True
             if self.settings.tgstat_auto_switch:
                 return False
@@ -176,6 +214,7 @@ class TGStatSearch:
         self.driver.get("https://tgstat.ru/channels/search")
         self._wait(lambda d: d.find_element(By.ID, "q").is_displayed() and
                    d.execute_script("return document.readyState==='complete' && window.jQuery && jQuery.active===0"), 90)
+        self.check_login()
 
     @diagnosed('read_categories')
     def read_categories(self):
@@ -343,21 +382,57 @@ class TGStatSearch:
         return {"usernames": result, "exhausted": self._more() is None, "restricted": False,
                 'without_public_username': len(self._unavailable_urls) - before_unavailable}
 
+    def _save_session_state(self, **updates):
+        if self.driver is not None and getattr(self.driver, '_monetizer_persistent', False) is True:
+            try:
+                update_session_state(self.settings.tgstat_profile_id, **updates)
+            except (OSError, ValueError):
+                logger().warning('session=%s could not save profile status', self.session_id)
+
+    def check_login(self):
+        with self._lifecycle_lock:
+            return self._check_login()
+
+    def _check_login(self):
+        state = login_state(self.driver) if self.driver is not None else {
+            'auth_status': 'unknown', 'auth_reason': 'Chrome закрыт; откройте профиль для проверки входа'}
+        self._save_session_state(**state, checked_at=datetime.now(timezone.utc).isoformat())
+        logger().info('session=%s profile=%s auth_status=%s', self.session_id, self.settings.tgstat_profile_id, state['auth_status'])
+        return state
+
     def close(self, force=False):
+        with self._lifecycle_lock:
+            return self._close(force)
+
+    def _close(self, force=False):
+        report = {'closed': self.driver is None, 'auth_status': 'unknown'}
         if self.driver:
             if self.preserve_on_close and self.settings.keep_browser_on_error and not force:
                 retain(self)
                 self._progress('Chrome оставлен открытым для диагностики. Закрыть его можно в разделе Dev-диагностики.')
-                return
+                return report
+            if getattr(self, 'purpose', '') == 'profile_login':
+                report.update(self.check_login())
             try:
                 self.driver.quit()
             except Exception:
                 logger().exception('session=%s browser close failed', self.session_id)
+                retain(self)
+                self._progress('Chrome не завершился штатно. Закройте его вручную и повторите закрытие в панели; профиль остаётся занят.')
+                if force:
+                    raise
+                return report
+            close_kind = getattr(self.driver, '_monetizer_close_kind', 'graceful')
+            close_status = 'already_closed' if close_kind == 'already_closed' else 'closed'
+            self._save_session_state(close_status=close_status, closed_at=datetime.now(timezone.utc).isoformat())
             self.driver = None
+            report['closed'] = True
+            report['close_status'] = close_status
             logger().info('session=%s browser closed', self.session_id)
         if self._chrome_guard is not None:
             self._chrome_guard.__exit__()
             self._chrome_guard = None
+        return report
 
     def __exit__(self, *args):
         self.close()

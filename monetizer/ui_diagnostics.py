@@ -17,8 +17,11 @@ def diagnostics_panel(runner):
         st.write('Открытое окно диагностики: ' + session['session_id'])
         st.json(session)
         if st.button('Закрыть сохранённый Chrome', key='close_' + session['session_id']):
-            close_retained(session['session_id'])
-            st.rerun()
+            try:
+                close_retained(session['session_id'])
+                st.rerun()
+            except Exception:
+                st.error('Chrome не завершился штатно. Закройте окно вручную и повторите кнопку; профиль остаётся занят.')
     tail = log_tail()
     st.code(tail, language=None)
     st.download_button('Скачать лог диагностики', tail, 'monetizer-debug.log', mime='text/plain')
