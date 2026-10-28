@@ -9,6 +9,7 @@ import json
 import re
 import sqlite3
 import time
+from dataclasses import replace
 
 from .audit import normalize_username
 from .categories import assessment_profiles
@@ -62,6 +63,8 @@ def request_data(row, settings, topic, profile):
                                           'activity_target_age_hours', 'activity_age_tolerance_hours', 'norm', 'metric_rule_version')},
         'sender_profile': profile,
     }
+    if settings.ai_prompt_variant != 'baseline':
+        data['prompt_variant'] = settings.ai_prompt_variant
     # Keep all post IDs/dates and literal text prefixes. Never summarize evidence
     # with another model or truncate the sender's claims/rules to fit a request.
     if len(response_prompt(data, '0' * 64).encode('utf-8')) > settings.ai_prompt_bytes:
@@ -80,14 +83,29 @@ def request_data(row, settings, topic, profile):
 
 
 def cache_key(data, settings):
+    settings = effective_settings(settings)
     return hashlib.sha256(dumps([data, settings.ai_base_url.rstrip('/'), settings.ai_model,
                                 PROMPT_VERSION, RULE_VERSION, CATALOG_VERSION, PLAYBOOK_VERSION]).encode()).hexdigest()
+
+
+def effective_settings(settings):
+    model = settings.ai_screen_model if settings.ai_analysis_stage == 'screen' else settings.ai_deep_model
+    return replace(settings, ai_model=model.strip()) if model.strip() else settings
 
 
 def response_prompt(data, key):
     template = {'channel_id': data['channel_id'], 'input_hash': key, 'channel_type': 'unknown',
                 'relevance': 'unknown', 'reason': '', 'evidence': [], 'offers': [], 'message': ''}
-    return (
+    extra = ''
+    if data.get('prompt_variant') == 'strict':
+        extra += 'Консервативный разбор: при неоднозначном авторстве выбирай unknown. Отдельно проверь каждое доказательство. '
+    elif data.get('prompt_variant') == 'concise':
+        extra += 'Краткий разбор: reason до 400 символов; оставь только наиболее сильные доказательства. '
+    experiment = data.get('experiment', {})
+    if experiment.get('base'):
+        extra += ('Исправь только поля ' + ', '.join(experiment['fields']) + '. Остальные поля исходного ответа сохрани дословно; '
+                  'channel_id и input_hash возьми из новой схемы. Верни полный JSON. Исходный ответ: ' + json.dumps(experiment['base'], ensure_ascii=False) + '\n')
+    return extra + (
         'Ты проверяешь публичный Telegram-канал для партнёрства с личным практикующим экспертом. '
         'Верни только JSON по схеме ниже. channel_id и input_hash скопируй точно. '
         'channel_type: expert, school, brand, news, job_board, aggregator, store, unknown. '
@@ -268,6 +286,7 @@ def apply_assessment(row, settings, topic, profile):
     """Apply only a fresh, validated response; retain the local rule result."""
     row['local_verdict'] = row['verdict']
     row['local_status'] = row['status']
+    settings = effective_settings(settings)
     data = request_data(row, settings, topic, profile)
     key = cache_key(data, settings)
     review = row.get('api_ai_review')
@@ -312,7 +331,7 @@ class ProxyAuditor:
         self.stop, self.log, self.disabled = stop, log, False
         self.proxy_info = None
 
-    def _preflight(self, deadline):
+    def _preflight(self, deadline, model=None):
         if self.proxy_info is None:
             seconds = min(20, max(.1, deadline - time.monotonic())) if deadline else 20
             self.log('AI: проверяю версию web2api и список моделей (без генерации)')
@@ -320,7 +339,7 @@ class ProxyAuditor:
             info = self.proxy_info
             if info['models_http'] in (401, 403):
                 raise ProxyError('web2api отклонил доступ при GET /models; проверьте ключ и настройки доступа; генерация не отправлялась', disable=True)
-            if info['models_checked'] and self.settings.ai_model not in info['models']:
+            if info['models_checked'] and (model or self.settings.ai_model) not in info['models']:
                 raise ProxyError('Model ID отсутствует в списке web2api; проверьте модель и Cookie Pool; генерация не отправлялась',
                                  disable=True, status='model_unavailable')
             if not info['health_ok'] and not info['auth_checked']:
@@ -336,7 +355,8 @@ class ProxyAuditor:
             return db.execute('SELECT count(*) FROM api_ai_attempts WHERE run_id=?', (run_id,)).fetchone()[0]
 
     def has_cache(self, row, topic, profile):
-        key = cache_key(request_data(row, self.settings, topic, profile), self.settings)
+        settings = effective_settings(self.settings)
+        key = cache_key(request_data(row, settings, topic, profile), settings)
         with self.repo.connect() as db:
             hit = db.execute('SELECT created_at FROM api_ai_cache WHERE cache_key=?', (key,)).fetchone()
         return bool(hit and 0 <= time.time() - hit['created_at'] <= CACHE_SECONDS)
@@ -356,9 +376,11 @@ class ProxyAuditor:
                                 (run_id, endpoint, key, now, 'started'))
             return cursor.lastrowid, ''
 
-    def audit(self, row, run_id, topic, profile, deadline=None):
-        settings = self.settings
-        data = request_data(row, settings, topic, profile)
+    def audit(self, row, run_id, topic, profile, deadline=None, experiment=None, prepared_data=None):
+        settings = effective_settings(self.settings)
+        data = copy.deepcopy(prepared_data) if prepared_data is not None else request_data(row, settings, topic, profile)
+        if experiment:
+            data['experiment'] = experiment
         key = cache_key(data, settings)
         row = {**copy.deepcopy(row), 'ai_request_key': key}
         def skipped(status, detail=''):
@@ -391,7 +413,7 @@ class ProxyAuditor:
             return skipped('input_too_large', 'Правила, профиль и фрагменты не помещаются в лимит; POST не отправлялся')
         # GET metadata does not spend the five-POST budget. Do not block cache hits.
         try:
-            self._preflight(deadline)
+            self._preflight(deadline, settings.ai_model)
         except ProxyError as exc:
             self.disabled = self.disabled or exc.disable
             self.log('AI: ' + exc.detail)
@@ -431,6 +453,14 @@ class ProxyAuditor:
                 content = content.split('\n', 1)[1].rsplit('```', 1)[0].strip()
             detail = 'AI вернул невалидный JSON или ответ без проверяемых источников'
             decoded = json.loads(content)
+            if not isinstance(decoded, dict):
+                raise ValueError('Ответ AI должен быть объектом JSON')
+            if experiment and experiment.get('base'):
+                editable = set(experiment['fields']) | {'channel_id', 'input_hash'}
+                for field, old in experiment['base'].items():
+                    if field not in editable and decoded.get(field) != old:
+                        detail = 'AI изменил поле вне выбранного списка исправлений'
+                        raise ValueError(detail)
             try:
                 review = validate_review(decoded, data, key)
             except ValueError as exc:

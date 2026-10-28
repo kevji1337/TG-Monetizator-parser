@@ -55,6 +55,7 @@ def logger():
 
 def diagnosed(stage):
     def decorate(function):
+        from .audit import Cancelled  # Bind to this code generation, not a later UI import.
         @functools.wraps(function)
         def run(self, *args, **kwargs):
             started = time.perf_counter()
@@ -63,7 +64,6 @@ def diagnosed(stage):
             try:
                 result = function(self, *args, **kwargs)
             except Exception as exc:
-                from .audit import Cancelled
                 if isinstance(exc, Cancelled):
                     self.preserve_on_close = False
                     logger().info('session=%s stage=%s cancelled', self.session_id, stage)

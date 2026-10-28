@@ -15,6 +15,8 @@ from test_core import NOW, preview
 
 class InterfaceTests(unittest.TestCase):
     def setUp(self):
+        self.code_reload = patch('monetizer.live_reload.refresh_code')
+        self.code_reload.start()
         st.cache_resource.clear()
         self.directory = tempfile.TemporaryDirectory()
         self.runner = JobRunner(Path(self.directory.name) / "checkpoint.json")
@@ -27,11 +29,102 @@ class InterfaceTests(unittest.TestCase):
         self.app_path = Path(__file__).resolve().parents[1] / "monetizer_app.py"
 
     def tearDown(self):
+        self.code_reload.stop()
         self.factory.stop()
         self.runtime.stop()
         self.profile_root.stop()
         self.directory.cleanup()
         st.cache_resource.clear()
+
+    def test_presets_apply_without_starting_a_search(self):
+        with patch.object(self.runner, 'start') as start:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(n for n in app.number_input if n.label == 'Подписчики от').set_value(5000).run()
+            next(t for t in app.text_input if t.label == 'Название пресета').set_value('Мой пресет').run()
+            next(b for b in app.button if b.label == 'Сохранить текущие настройки как пресет').click().run()
+            next(s for s in app.selectbox if s.label == 'Сохранённый пресет').set_value('Мой пресет').run()
+            next(n for n in app.number_input if n.label == 'Подписчики от').set_value(7000).run()
+            next(b for b in app.button if b.label == 'Применить пресет').click().run()
+            self.assertEqual(next(n for n in app.number_input if n.label == 'Подписчики от').value, 5000)
+            start.assert_not_called()
+            self.assertEqual(len(app.exception), 0)
+
+    def test_new_tools_and_business_pages_render_without_network(self):
+        self._seed_database()
+        with patch('monetizer.runner.TGStatSearch') as browser, patch('monetizer.runner.WebAuditor') as network, \
+                patch('monetizer.ai_audit.chat_completion') as ai:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(r for r in app.radio if r.label == 'Раздел').set_value('Инструменты').run()
+            for name in ['Поиск и очередь', 'Анализ контента', 'Калибровка порога', 'AI-лаборатория', 'Теги и подборки']:
+                next(r for r in app.radio if r.label == 'Инструмент').set_value(name).run()
+                self.assertEqual(len(app.exception), 0, name)
+                self.assertEqual(len(app.error), 0, name)
+            for name in ['Канбан', 'Аналитика партнёрств']:
+                next(r for r in app.radio if r.label == 'Раздел').set_value(name).run()
+                self.assertEqual(len(app.exception), 0, name)
+                self.assertEqual(len(app.error), 0, name)
+            browser.assert_not_called()
+            network.assert_not_called()
+            ai.assert_not_called()
+
+    def test_tags_economics_and_kanban_status_are_persisted(self):
+        from monetizer.workspace import Workspace
+        self._seed_database()
+        app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+        next(t for t in app.text_input if t.label == 'Теги через запятую').set_value('дизайнер, личный блог')
+        next(t for t in app.text_input if t.label == 'Подборки через запятую').set_value('Первый контакт')
+        next(s for s in app.selectbox if s.label == 'Этап партнёрства').set_value('talks')
+        next(n for n in app.number_input if n.label == 'Предполагаемый средний чек').set_value(1000.)
+        next(b for b in app.button if b.label == 'Сохранить теги и экономику').click().run()
+        record = Workspace(self.runner.repo).get('candidate', 'expert_blog')
+        self.assertEqual(record['tags'], ['дизайнер', 'личный блог'])
+        self.assertEqual(record['economics']['price'], 1000)
+        next(r for r in app.radio if r.label == 'Раздел').set_value('Канбан').run()
+        next(s for s in app.selectbox if s.label == 'Переместить').set_value('contacted').run()
+        next(b for b in app.button if b.label == 'Переместить').click().run()
+        self.assertEqual(self.runner.repo.list_channels()[0]['work_status'], 'contacted')
+        self.assertEqual(len(app.exception), 0)
+
+    def test_draft_can_be_prepared_during_search_without_mutating_active_categories(self):
+        from monetizer.workspace import Workspace
+        from monetizer.settings import Settings
+        self.runner.state.update(status='running', stage='Поиск', settings=Settings(search_mode='categories', category_ids=('34',)).to_dict())
+        with patch.object(self.runner, 'start') as start:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(r for r in app.radio if r.label == 'Раздел').set_value('Инструменты').run()
+            next(m for m in app.multiselect if m.label == 'Следующие категории').set_value(['53']).run()
+            next(b for b in app.button if b.label == 'Сохранить следующий поиск').click().run()
+            self.assertEqual(Workspace(self.runner.repo).get('draft', 'next_search')['categories'], ['53'])
+            self.assertEqual(self.runner.state['settings']['category_ids'], ('34',))
+            self.assertTrue(next(b for b in app.button if b.label == 'Подставить подготовленный поиск в панель').disabled)
+            start.assert_not_called()
+            self.assertEqual(len(app.exception), 0)
+
+    def test_table_view_roundtrip_and_candidate_navigation_buttons(self):
+        self._seed_database()
+        app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+        next(m for m in app.multiselect if m.label == 'Видимые столбцы').set_value(['username', 'title']).run()
+        next(t for t in app.text_input if t.label == 'Название вида').set_value('Коротко').run()
+        next(b for b in app.button if b.label == 'Сохранить вид таблицы').click().run()
+        next(s for s in app.selectbox if s.label == 'Сохранённый вид').set_value('Коротко').run()
+        next(m for m in app.multiselect if m.label == 'Видимые столбцы').set_value(['username', 'subs']).run()
+        next(b for b in app.button if b.label == 'Применить вид').click().run()
+        self.assertEqual(next(m for m in app.multiselect if m.label == 'Видимые столбцы').value, ['username', 'title'])
+        next(b for b in app.button if b.label == 'Следующий →').click().run()
+        self.assertEqual(next(s for s in app.selectbox if s.label == 'Канал для черновика').value, '@expert_blog')
+        self.assertEqual(len(app.exception), 0)
+
+    def test_retry_errors_selects_only_failed_channels_and_forces_fetch(self):
+        self._seed_database()
+        self.runner.state['rows'].append(error_row('failed_blog', 'network', 'Timeout'))
+        with patch.object(self.runner, 'start') as start:
+            app = AppTest.from_file(str(self.app_path)).run(timeout=15)
+            next(r for r in app.radio if r.label == 'Раздел').set_value('Инструменты').run()
+            next(b for b in app.button if b.label == 'Повторить только ошибки доступа (1)').click().run()
+            self.assertEqual(start.call_args.kwargs['usernames'], ['@failed_blog'])
+            self.assertTrue(start.call_args.args[0].force_reaudit)
+            self.assertFalse(start.call_args.args[0].ai_enabled)
+            self.assertEqual(len(app.exception), 0)
 
     def test_initial_page_uses_real_tgstat_categories(self):
         app = AppTest.from_file(str(self.app_path)).run(timeout=15)

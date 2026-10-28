@@ -23,6 +23,8 @@ def show_evidence(row, repo=None, running=False):
     candidate_card(row)
     if repo is not None:
         contact_plan_editor(repo, row, running)
+        from .ui_studio import candidate_editor
+        candidate_editor(repo, row, running)
     if assessment_stale(row):
         st.warning('Автоматическая оценка устарела. Откройте нужный запуск из истории и пересчитайте сохранённые оценки в разделе «Поиск».')
     st.caption("Тип: " + TYPE_LABELS.get(row.get("channel_type"), "Не установлено") + " · Тематика: " + row.get("relevance", "unknown"))

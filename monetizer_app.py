@@ -4,9 +4,15 @@ import hashlib
 import json
 import os
 import time
+import importlib
 from collections import Counter
 
 import streamlit as st
+
+_bootstrap = importlib.import_module('monetizer.live_reload')
+if getattr(_bootstrap, 'BOOTSTRAP_VERSION', 0) != 2:
+    _bootstrap = importlib.reload(_bootstrap)
+_bootstrap.refresh_code()
 
 from monetizer.export import COLUMNS, csv_bytes, xlsx_bytes, REPORTS_DIR
 from monetizer.audit import WebAuditor
@@ -33,6 +39,15 @@ from monetizer.runtime import acquire_runner
 from monetizer.ui_navigation import sidebar_navigation
 from monetizer.ui_style import apply_style
 from monetizer.ui_tables import COMPACT_COLUMNS, candidate_columns, workspace_columns, search_locked
+from monetizer.live_reload import ui_api
+from monetizer.ui_power import apply_pending, preset_panel, table_options, candidate_selector, toggle_table_view, reminder_badge
+from monetizer.workspace import Workspace, search_eta, DEAL_STAGES
+from monetizer.experiments import experiment_active
+
+# A running server can retain pre-update modules even after the page changes.
+_preferences_api, profile_panel = ui_api()
+Preferences, PersistentUI = _preferences_api.Preferences, _preferences_api.PersistentUI
+api_key_field, last_run_preferences = _preferences_api.api_key_field, _preferences_api.last_run_preferences
 
 PAGE_STARTED = time.perf_counter()
 
@@ -51,8 +66,10 @@ def downloads(rows):
 
 runner = get_runner()
 run_snapshot = runner.snapshot()
+run_snapshot['experiment_active'] = experiment_active(runner.repo)
 search_busy = search_locked(run_snapshot)
 preferences = Preferences(runner.repo, last_run_preferences(run_snapshot))
+apply_pending(preferences, search_busy)
 if search_busy:
     # Show the actual immutable run conditions, rather than next-run draft edits.
     for key, value in last_run_preferences(run_snapshot).items():
@@ -61,6 +78,8 @@ if search_busy:
 ui = PersistentUI(preferences)
 search_ui = PersistentUI(preferences, disabled=search_busy)
 section = sidebar_navigation(ui)
+preset_panel(runner.repo, preferences, search_busy)
+reminder_badge(runner.repo, preferences)
 st.title("Монетизатор трафика")
 st.caption("Поиск публичных Telegram-каналов экспертов · аудит просмотров · черновики предложений")
 
@@ -76,6 +95,10 @@ with st.sidebar:
             ai_key = api_key_field(preferences, disabled=search_busy)
             ai_base_url = search_ui.text_input('Base URL AI', value=AI_BASE_URL)
             ai_model = search_ui.text_input('Model ID', value=AI_MODEL)
+            ai_screen = search_ui.text_input('Модель первичного разбора', value='', help='Пустое поле использует Model ID выше.')
+            ai_deep = search_ui.text_input('Модель глубокого разбора', value='', help='Пустое поле использует Model ID выше.')
+            ai_stage = search_ui.selectbox('Этап AI-разбора', ['deep', 'screen'], format_func=lambda v: 'Глубокий' if v == 'deep' else 'Первичный')
+            ai_variant = search_ui.selectbox('Вариант промпта', ['baseline', 'strict', 'concise'])
             ai_max_audits = search_ui.number_input('Максимум запросов AI за запуск', 1, 5, 5)
             ai_timeout = search_ui.number_input('Таймаут AI, секунд', 10, 900, 600, step=10,
                                          help='Общий срок ожидания, включая запуск ответа и reasoning. Подключение ограничено отдельно: 5 секунд.')
@@ -112,7 +135,8 @@ with st.sidebar:
                                'Исправление таймаута появилось в 4.24.1. Фактическая модель видна в Requests web2api.')
                 st.caption('Список моделей не подтверждает действительность cookie или оставшуюся квоту аккаунта.')
         ai_config = dict(ai_base_url=ai_base_url, ai_model=ai_model, ai_max_audits=ai_max_audits,
-                         ai_timeout=ai_timeout, ai_prompt_bytes=ai_prompt_bytes)
+                         ai_timeout=ai_timeout, ai_prompt_bytes=ai_prompt_bytes,
+                         ai_screen_model=ai_screen, ai_deep_model=ai_deep, ai_analysis_stage=ai_stage, ai_prompt_variant=ai_variant)
         st.caption('Настройки сохраняются автоматически. Текстовые поля — после Enter или выхода из поля.')
         with st.expander('Режим разработки'):
             dev_mode = search_ui.checkbox('Dev-режим', value=os.environ.get('MONETIZER_DEV') == '1')
@@ -187,10 +211,15 @@ with st.sidebar:
             exclude_scam = search_ui.checkbox('Без SCAM/FAKE', value=True)
             exclude_red = search_ui.checkbox('Без красной метки', value=True)
             st.caption('Приватные каналы без публичного username или превью t.me/s нельзя проверить этим аудитором.')
+        with st.expander('План работы по категориям'):
+            st.caption('Каждая категория получает начальную порцию; затем учитываются эффективность и выбранный вес.')
+            category_weights = tuple((c, search_ui.number_input(labels[c] + ' — вес', 1, 10, 1,
+                                      key='category_weight_' + c)) for c in category_ids)
         with st.expander("Критерии и скорость"):
             st.caption('Дополнительные критерии аудита публичного превью; они отделены от фильтров поиска TGStat.')
             avg_ratio = search_ui.number_input('Средние просмотры от подписчиков, %', 0.0, 100.0, 10.0, step=0.5,
                                         help='Средние просмотры постов / число подписчиков × 100. Например, 10% при 5000 подписчиков — 500 просмотров в среднем. 0 отключает этот порог.')
+            posts_limit = search_ui.number_input('Публикаций для аудита', 5, 50, 20)
             post_age = search_ui.number_input('Возраст поста для оценки активности, часов', 1, 168, 24,
                                        help='Берётся пост, ближайший к этому возрасту, в пределах допустимого отклонения.')
             post_tolerance = search_ui.number_input('Допустимое отклонение возраста, часов', 0, post_age, min(6, post_age))
@@ -209,11 +238,12 @@ with st.sidebar:
         if invalid_bounds:
             st.warning('Минимум больше максимума: ' + ', '.join(invalid_bounds) + '.')
         if search_busy:
-            st.info('Поиск идёт. Категории и условия зафиксированы. Чтобы изменить их, остановите запуск и начните новый поиск. Просмотр результатов доступен.')
+            st.info('Выполняется поиск или AI-эксперимент. Условия зафиксированы. Для изменения остановите задачу и начните новую. Просмотр результатов доступен.')
         if st.button("Начать поиск и аудит" if mode.startswith("TGStat") else "Начать аудит", type="primary", width="stretch",
                      disabled=search_busy or bool(invalid_bounds) or (mode.startswith('TGStat') and not TGStatProfiles(runner.repo).list())):
             try:
                 settings = Settings(min_subs=min_subs, max_subs=max_subs, min_daily_reach=daily,
+                                    category_weights=category_weights, posts_limit=posts_limit,
                                     min_avg_views=0, min_avg_view_ratio=avg_ratio, target_count=count, target_post_age_hours=post_age,
                                     post_age_tolerance_hours=post_tolerance, min_post_view_ratio=post_ratio,
                                     max_gap_days=gap, workers=workers, requests_per_second=rate,
@@ -247,6 +277,7 @@ with st.sidebar:
 @st.fragment(run_every="2s")
 def results_panel():
     state = runner.snapshot()
+    state['experiment_active'] = experiment_active(runner.repo)
     if search_locked(state) != search_busy:
         st.rerun()  # Unlock the sidebar when the background job finishes.
     running = state["status"] in ("running", "stopping")
@@ -319,6 +350,8 @@ def results_panel():
                         except (ValueError, RuntimeError, OSError) as exc:
                             st.error(str(exc))
     if running:
+        estimate = search_eta(state)
+        st.caption(('Ориентировочно ' + str(estimate['minutes']) + ' мин. ' if estimate['minutes'] is not None else '') + estimate['text'])
         st.progress(min(green / state["settings"]["target_count"], 1.0),
                     text=f"Подходят {green}; проверено {len(rows)}; найдено {count_found}")
         if has_ai:
@@ -409,9 +442,13 @@ def results_panel():
     only_contact = ui.on(filter_columns[1]).checkbox("С кандидатом контакта")
     search = ui.on(filter_columns[2]).text_input("Поиск в результатах", placeholder="Название или @username")
     hide_non_target = ui.checkbox('Скрыть новости, агрегаторы, школы, бренды, магазины и доски вакансий', value=True)
+    chosen_tags = ui.multiselect('Теги в результатах', sorted({tag for r in rows for tag in r.get('custom_tags', [])}))
+    chosen_collections = ui.multiselect('Подборки в результатах', sorted({tag for r in rows for tag in r.get('custom_collections', [])}))
     selected = [r for r in rows if (not only_green or (not r.get('assessment_stale') and r.get("status") in ("top", "recommended")))
                 and (not hide_non_target or (r.get('channel_type') or 'unknown') in ('expert', 'unknown'))
                 and (not only_contact or r.get("author_contact"))
+                and (not chosen_tags or set(chosen_tags) <= set(r.get('custom_tags', [])))
+                and (not chosen_collections or set(chosen_collections) & set(r.get('custom_collections', [])))
                 and (not reason_filter or selection_bucket(r) in reason_filter)
                 and (not search or search.casefold() in f"{r.get('title', '')} {r['username']}".casefold())]
     st.caption(f"Показано {len(selected)} из {len(rows)}. Скачивание учитывает фильтры.")
@@ -421,142 +458,155 @@ def results_panel():
     if state.get('settings', {}).get('ai_enabled'):
         visible.insert(2, 'ai_audit_status')
         visible.insert(3, 'ai_priority_score')
-    visible += ['next_contact_date', 'next_action_label']
+    visible += ['next_contact_date', 'next_action_label', 'custom_tags', 'custom_collections', 'deal_stage']
     table_mode = ui.radio('Вид таблицы', ['Компактный', 'Подробный'], horizontal=True)
+    st.button('Сменить вид · Alt+V', shortcut='Alt+V', on_click=toggle_table_view)
+    defaults = [k for k in COMPACT_COLUMNS if k in visible] if table_mode == 'Компактный' else visible
+    chosen_columns = table_options(runner.repo, ui, visible, defaults, table_mode, COLUMNS)
     frame = pd.DataFrame([{COLUMNS[k]: '⏳ Оценка устарела' if k == 'verdict' and r.get('assessment_stale') else
                            STATUS_LABELS.get(r.get(k), '') if k == 'ai_audit_status' else
+                           ', '.join(r.get(k, [])) if k in ('custom_tags', 'custom_collections') else
+                           DEAL_STAGES.get(r.get(k, 'none'), '') if k == 'deal_stage' else
                            TYPE_LABELS.get(r.get(k), 'Не установлено') if k == 'channel_type' else r.get(k)
                            for k in visible} for r in selected], columns=[COLUMNS[k] for k in visible])
-    table_columns = [COLUMNS[k] for k in COMPACT_COLUMNS if k in visible] if table_mode == 'Компактный' else list(frame.columns)
-    st.dataframe(frame, hide_index=True, width="stretch", height=min(570, max(150, 42 + len(frame) * 38)), row_height=38,
-                 column_order=table_columns,
-                 column_config=candidate_columns(state.get('settings', {}).get('target_post_age_hours', 24)))
+    table_columns = [COLUMNS[k] for k in chosen_columns]
+    side_card = ui.checkbox('Карточка рядом с таблицей', value=True)
+    if side_card and selected:
+        table_area, detail_area = st.columns([1.8, 1.0], gap='large')
+    else:
+        table_area, detail_area = st.container(), st.container()
+    with table_area:
+        st.dataframe(frame, hide_index=True, width="stretch", height=min(570, max(150, 42 + len(frame) * 38)), row_height=38,
+                     column_order=table_columns,
+                     column_config=candidate_columns(state.get('settings', {}).get('target_post_age_hours', 24)))
+        if selected:
+            csv_data, xlsx_data = downloads(selected)
+            filename = f"Монетизация_{state.get('run_id', 'каналы')[:12]}"
+            c1, c2 = st.columns(2)
+            c1.download_button("Скачать Excel", xlsx_data, filename + ".xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            c2.download_button("Скачать CSV", csv_data, filename + ".csv", mime="text/csv")
     if selected:
-        csv_data, xlsx_data = downloads(selected)
-        filename = f"Монетизация_{state.get('run_id', 'каналы')[:12]}"
-        c1, c2 = st.columns(2)
-        c1.download_button("Скачать Excel", xlsx_data, filename + ".xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        c2.download_button("Скачать CSV", csv_data, filename + ".csv", mime="text/csv")
-        st.subheader("Карточка канала и сообщение")
-        chosen = st.selectbox("Канал для черновика", [r["username"] for r in selected])
-        row = next(r for r in selected if r["username"] == chosen)
-        if st.button('AI-аудит этого канала по сохранённым постам', disabled=running or not ai_enabled):
-            try:
-                with st.spinner('Gemini анализирует тексты; используется лимит текущего запуска…'):
-                    result = runner.audit_with_ai(chosen, ai_key, ai_config)
-                if result.get('ai_audit_status') not in ('success', 'cached'):
-                    st.warning(STATUS_LABELS.get(result.get('ai_audit_status'), 'AI не выполнен') + ': ' + result.get('ai_detail', ''))
-                st.rerun()
-            except (ValueError, RuntimeError, OSError) as exc:
-                st.error(str(exc))
-        show_evidence(row, runner.repo, running)
-        if row.get('api_ai_review', {}).get('message'):
-            if st.button('Принять черновик Gemini как сохранённое сообщение', disabled=running):
-                review = row['api_ai_review']
+        with detail_area:
+            st.subheader("Карточка канала и сообщение")
+            chosen = candidate_selector(selected)
+            row = next(r for r in selected if r["username"] == chosen)
+            if st.button('AI-аудит этого канала по сохранённым постам', disabled=running or not ai_enabled):
                 try:
-                    runner.save_pitch(chosen, review['message'], 'gemini_api', review['evidence'][0]['source_id'])
+                    with st.spinner('Gemini анализирует тексты; используется лимит текущего запуска…'):
+                        result = runner.audit_with_ai(chosen, ai_key, ai_config)
+                    if result.get('ai_audit_status') not in ('success', 'cached'):
+                        st.warning(STATUS_LABELS.get(result.get('ai_audit_status'), 'AI не выполнен') + ': ' + result.get('ai_detail', ''))
                     st.rerun()
                 except (ValueError, RuntimeError, OSError) as exc:
                     st.error(str(exc))
-        context_key = f"content_{state.get('run_id')}_{chosen}"
-        editor_row = {**row, **st.session_state.get(context_key, {})}
-        st.caption("Редактор работает локально по загруженным сценариям. Для свободной AI-редактуры можно скачать промпт с данными канала и открыть его в ChatGPT или Claude.")
-        if st.button("Загрузить / обновить тексты канала", disabled=running):
-            try:
-                with st.spinner("Загружаю публичное описание и последние посты…"):
-                    fresh = runner.reaudit(chosen)
-                if fresh.get("status") == "error":
-                    st.error(fresh.get("error", fresh.get("reasons")))
-                else:
-                    context = fresh
-                    st.session_state[context_key] = context
-                    editor_row.update(context)
-            except (ValueError, RuntimeError, OSError) as exc:
-                st.error(str(exc))
-        sources = evidence_sources(editor_row)
-        source = None
-        if sources:
-            source_ids = [s["id"] for s in sources]
-            inferred_source = direct_scenario(editor_row)["evidence_id"]
-            default_source = next((i for i, s in enumerate(sources) if s["id"] == inferred_source),
-                                  next((i for i, s in enumerate(sources) if s["id"] != "description" and not s.get("forwarded")), 0))
-            source_id = st.selectbox("Источник наблюдения", source_ids, index=default_source,
-                                     format_func=lambda value: next(s["label"] for s in sources if s["id"] == value))
-            source = next(s for s in sources if s["id"] == source_id)
-            with st.expander("Текст выбранного источника"):
-                st.text(source["text"])
-                if source.get("url"):
-                    st.link_button("Открыть источник", source["url"])
-                if source.get("forwarded"):
-                    st.warning("Это пересланный материал; авторство владельца канала не подтверждено.")
-            quote_seed = hashlib.sha256(source["text"].encode()).hexdigest()[:10]
-            quote_value = source["text"][:220]
-            if len(source["text"]) > 220:
-                quote_value = quote_value.rsplit(" ", 1)[0]
-            quote = st.text_area("Конкретная цитата — можно сократить, сохраняя дословность",
-                                 value=quote_value, key=f"quote_{chosen}_{source_id}_{quote_seed}", height=100)
-        else:
-            st.info("В старом отчёте нет текстов постов. Загрузите их кнопкой выше; пока доступно только уточнение роли по названию канала.")
-            source_id, quote = None, None
-        suggestions = suggest_scenarios(editor_row)
-        if suggestions:
-            st.caption("По тексту можно проверить сценарии: " + "; ".join(SCENARIOS[s["scenario_id"]]["title"] for s in suggestions))
-        scenario_id = st.selectbox("Сценарий первого сообщения", list(SCENARIOS),
-                                   index=list(SCENARIOS).index(direct_scenario(editor_row)["scenario_id"]),
-                                   format_func=lambda value: SCENARIOS[value]["title"])
-        scenario = SCENARIOS[scenario_id]
-        with st.expander("Что нужно подтвердить для сценария", expanded=scenario_id != "limited_evidence"):
-            st.write("\n".join("• " + item for item in scenario["required_evidence"]))
-            st.write(scenario["observation_rule"])
-            st.caption("Избегать: " + "; ".join(scenario["avoid"]))
-        confirmed = st.checkbox("Проверил требования сценария по источнику, включая авторство",
-                                key=f"confirmed_{chosen}_{scenario_id}_{source_id}")
-        hypothesis_index = st.selectbox("Идея сотрудничества", list(range(len(scenario["partnership_hypotheses"]))),
-                                        format_func=lambda value: scenario["partnership_hypotheses"][value])
-        tone = ui.selectbox("Тон сообщения", ["Деловой", "Неформальный"])
-        st.caption('Профиль отправителя: ' + (sender_profile['name'] or 'имя не задано') + ' · ' + (sender_profile['role'] or 'роль не задана'))
-        st.caption(f"Контакт: {row.get('author_contact') or 'не найден'} · {row.get('contact_status', '')}. Наличие продюсера не установлено. Проверьте, кому принадлежат внешние ссылки.")
-        context_hash = hashlib.sha256(json.dumps([editor_row.get("about_text", ""), editor_row.get("content_samples", []),
-                                                  editor_row.get("pitch", "") if editor_row.get("pitch_edited") else ""], ensure_ascii=False).encode()).hexdigest()[:10]
-        profile_hash = profile_version(sender_profile) if not editor_row.get('pitch_edited') else 'manual'
-        draft_key = f"draft_{state.get('run_id')}_{chosen}_{PLAYBOOK_VERSION}_{context_hash}_{profile_hash}"
-        if draft_key not in st.session_state:
-            initial_draft = compose_pitch(editor_row, state.get("niche", ""), tone, profile=sender_profile)
-            st.session_state[draft_key] = editor_row.get("pitch", "") if editor_row.get("pitch_edited") else initial_draft["message"]
-            st.session_state[draft_key + "_meta"] = {"scenario_id": editor_row.get("pitch_scenario") if editor_row.get("pitch_edited") else initial_draft["scenario_id"],
-                                                      "source_id": editor_row.get("pitch_source") if editor_row.get("pitch_edited") else (initial_draft["source"] or {}).get("id")}
-        if st.button("Собрать черновик по выбранному источнику"):
-            try:
-                result = compose_pitch(editor_row, state.get("niche", ""), tone,
-                                       scenario_id=scenario_id, evidence_id=source_id, quote=quote,
-                                       confirmed=confirmed, hypothesis_index=hypothesis_index, profile=sender_profile)
-                st.session_state[draft_key] = result["message"]
-                st.session_state[draft_key + "_meta"] = {"scenario_id": result["scenario_id"],
-                                                          "source_id": (result["source"] or {}).get("id")}
-                for warning in result["warnings"]:
-                    st.warning(warning)
-            except ValueError as exc:
-                st.error(str(exc))
-        draft = st.text_area("Черновик — можно отредактировать", key=draft_key, height=230)
-        st.caption(f"{len(draft)} символов. После изменения источника, имени или сценария нажмите «Собрать черновик».")
-        if st.button("Сохранить текст в отчёт", disabled=running):
-            try:
-                metadata = st.session_state[draft_key + "_meta"]
-                runner.save_pitch(chosen, draft, metadata["scenario_id"], metadata["source_id"], st.session_state.get(context_key))
-                st.success("Текст сохранён в текущий отчёт и checkpoint. Обновлены полные CSV и Excel.")
-            except (ValueError, RuntimeError, OSError) as exc:
-                st.error(str(exc))
-        st.download_button("Скачать сообщение .txt", draft, f"pitch_{chosen.lstrip('@')}.txt", mime="text/plain")
-        st.download_button("Скачать промпт для ChatGPT / Claude", chatgpt_prompt(editor_row, state.get("niche", ""), scenario_id=scenario_id, profile=sender_profile),
-                           f"prompt_{chosen.lstrip('@')}.txt", mime="text/plain")
-        with st.expander("Учебные примеры сценария"):
-            st.caption("Примеры вымышлены. Их факты не используются как данные выбранного канала.")
-            for example in scenario.get("examples", []):
-                st.json(example["input_evidence"])
-                st.write(example["message"])
-                st.caption(example["reasoning"])
-        st.caption("Отправка выполняется вручную после проверки контакта и текста.")
+            show_evidence(row, runner.repo, running)
+            if row.get('api_ai_review', {}).get('message'):
+                if st.button('Принять черновик Gemini как сохранённое сообщение', disabled=running):
+                    review = row['api_ai_review']
+                    try:
+                        runner.save_pitch(chosen, review['message'], 'gemini_api', review['evidence'][0]['source_id'])
+                        st.rerun()
+                    except (ValueError, RuntimeError, OSError) as exc:
+                        st.error(str(exc))
+            context_key = f"content_{state.get('run_id')}_{chosen}"
+            editor_row = {**row, **st.session_state.get(context_key, {})}
+            st.caption("Редактор работает локально по загруженным сценариям. Для свободной AI-редактуры можно скачать промпт с данными канала и открыть его в ChatGPT или Claude.")
+            if st.button("Загрузить / обновить тексты канала", disabled=running):
+                try:
+                    with st.spinner("Загружаю публичное описание и последние посты…"):
+                        fresh = runner.reaudit(chosen)
+                    if fresh.get("status") == "error":
+                        st.error(fresh.get("error", fresh.get("reasons")))
+                    else:
+                        context = fresh
+                        st.session_state[context_key] = context
+                        editor_row.update(context)
+                except (ValueError, RuntimeError, OSError) as exc:
+                    st.error(str(exc))
+            sources = evidence_sources(editor_row)
+            source = None
+            if sources:
+                source_ids = [s["id"] for s in sources]
+                inferred_source = direct_scenario(editor_row)["evidence_id"]
+                default_source = next((i for i, s in enumerate(sources) if s["id"] == inferred_source),
+                                      next((i for i, s in enumerate(sources) if s["id"] != "description" and not s.get("forwarded")), 0))
+                source_id = st.selectbox("Источник наблюдения", source_ids, index=default_source,
+                                         format_func=lambda value: next(s["label"] for s in sources if s["id"] == value))
+                source = next(s for s in sources if s["id"] == source_id)
+                with st.expander("Текст выбранного источника"):
+                    st.text(source["text"])
+                    if source.get("url"):
+                        st.link_button("Открыть источник", source["url"])
+                    if source.get("forwarded"):
+                        st.warning("Это пересланный материал; авторство владельца канала не подтверждено.")
+                quote_seed = hashlib.sha256(source["text"].encode()).hexdigest()[:10]
+                quote_value = source["text"][:220]
+                if len(source["text"]) > 220:
+                    quote_value = quote_value.rsplit(" ", 1)[0]
+                quote = st.text_area("Конкретная цитата — можно сократить, сохраняя дословность",
+                                     value=quote_value, key=f"quote_{chosen}_{source_id}_{quote_seed}", height=100)
+            else:
+                st.info("В старом отчёте нет текстов постов. Загрузите их кнопкой выше; пока доступно только уточнение роли по названию канала.")
+                source_id, quote = None, None
+            suggestions = suggest_scenarios(editor_row)
+            if suggestions:
+                st.caption("По тексту можно проверить сценарии: " + "; ".join(SCENARIOS[s["scenario_id"]]["title"] for s in suggestions))
+            scenario_id = st.selectbox("Сценарий первого сообщения", list(SCENARIOS),
+                                       index=list(SCENARIOS).index(direct_scenario(editor_row)["scenario_id"]),
+                                       format_func=lambda value: SCENARIOS[value]["title"])
+            scenario = SCENARIOS[scenario_id]
+            with st.expander("Что нужно подтвердить для сценария", expanded=scenario_id != "limited_evidence"):
+                st.write("\n".join("• " + item for item in scenario["required_evidence"]))
+                st.write(scenario["observation_rule"])
+                st.caption("Избегать: " + "; ".join(scenario["avoid"]))
+            confirmed = st.checkbox("Проверил требования сценария по источнику, включая авторство",
+                                    key=f"confirmed_{chosen}_{scenario_id}_{source_id}")
+            hypothesis_index = st.selectbox("Идея сотрудничества", list(range(len(scenario["partnership_hypotheses"]))),
+                                            format_func=lambda value: scenario["partnership_hypotheses"][value])
+            tone = ui.selectbox("Тон сообщения", ["Деловой", "Неформальный"])
+            st.caption('Профиль отправителя: ' + (sender_profile['name'] or 'имя не задано') + ' · ' + (sender_profile['role'] or 'роль не задана'))
+            st.caption(f"Контакт: {row.get('author_contact') or 'не найден'} · {row.get('contact_status', '')}. Наличие продюсера не установлено. Проверьте, кому принадлежат внешние ссылки.")
+            context_hash = hashlib.sha256(json.dumps([editor_row.get("about_text", ""), editor_row.get("content_samples", []),
+                                                      editor_row.get("pitch", "") if editor_row.get("pitch_edited") else ""], ensure_ascii=False).encode()).hexdigest()[:10]
+            profile_hash = profile_version(sender_profile) if not editor_row.get('pitch_edited') else 'manual'
+            draft_key = f"draft_{state.get('run_id')}_{chosen}_{PLAYBOOK_VERSION}_{context_hash}_{profile_hash}"
+            if draft_key not in st.session_state:
+                initial_draft = compose_pitch(editor_row, state.get("niche", ""), tone, profile=sender_profile)
+                st.session_state[draft_key] = editor_row.get("pitch", "") if editor_row.get("pitch_edited") else initial_draft["message"]
+                st.session_state[draft_key + "_meta"] = {"scenario_id": editor_row.get("pitch_scenario") if editor_row.get("pitch_edited") else initial_draft["scenario_id"],
+                                                          "source_id": editor_row.get("pitch_source") if editor_row.get("pitch_edited") else (initial_draft["source"] or {}).get("id")}
+            if st.button("Собрать черновик по выбранному источнику"):
+                try:
+                    result = compose_pitch(editor_row, state.get("niche", ""), tone,
+                                           scenario_id=scenario_id, evidence_id=source_id, quote=quote,
+                                           confirmed=confirmed, hypothesis_index=hypothesis_index, profile=sender_profile)
+                    st.session_state[draft_key] = result["message"]
+                    st.session_state[draft_key + "_meta"] = {"scenario_id": result["scenario_id"],
+                                                              "source_id": (result["source"] or {}).get("id")}
+                    for warning in result["warnings"]:
+                        st.warning(warning)
+                except ValueError as exc:
+                    st.error(str(exc))
+            draft = st.text_area("Черновик — можно отредактировать", key=draft_key, height=230)
+            st.caption(f"{len(draft)} символов. После изменения источника, имени или сценария нажмите «Собрать черновик».")
+            if st.button("Сохранить текст в отчёт", disabled=running, shortcut='Alt+S'):
+                try:
+                    metadata = st.session_state[draft_key + "_meta"]
+                    runner.save_pitch(chosen, draft, metadata["scenario_id"], metadata["source_id"], st.session_state.get(context_key))
+                    st.success("Текст сохранён в текущий отчёт и checkpoint. Обновлены полные CSV и Excel.")
+                except (ValueError, RuntimeError, OSError) as exc:
+                    st.error(str(exc))
+            st.download_button("Скачать сообщение .txt", draft, f"pitch_{chosen.lstrip('@')}.txt", mime="text/plain")
+            st.download_button("Скачать промпт для ChatGPT / Claude", chatgpt_prompt(editor_row, state.get("niche", ""), scenario_id=scenario_id, profile=sender_profile),
+                               f"prompt_{chosen.lstrip('@')}.txt", mime="text/plain")
+            with st.expander("Учебные примеры сценария"):
+                st.caption("Примеры вымышлены. Их факты не используются как данные выбранного канала.")
+                for example in scenario.get("examples", []):
+                    st.json(example["input_evidence"])
+                    st.write(example["message"])
+                    st.caption(example["reasoning"])
+            st.caption("Отправка выполняется вручную после проверки контакта и текста.")
     if state["paths"]:
         with st.expander("Автоматически сохранённые файлы"):
             for path in state["paths"]:
@@ -570,6 +620,9 @@ elif section == 'Профили TGStat':
 elif section == 'Dev-диагностика':
     from monetizer.ui_diagnostics import diagnostics_panel
     diagnostics_panel(runner)
+elif section in ('Инструменты', 'Канбан', 'Аналитика партнёрств'):
+    from monetizer.ui_studio import render_studio
+    render_studio(runner, section, ai_key or os.environ.get('MONETIZER_AI_KEY', ''), ai_config)
 else:
     render_workspace(runner, section)
 if dev_mode:

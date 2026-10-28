@@ -105,6 +105,11 @@ def last_run_preferences(state):
         'ai_max_audits': ('number_input', 'Максимум запросов AI за запуск'),
         'ai_timeout': ('number_input', 'Таймаут AI, секунд'),
         'ai_prompt_bytes': ('number_input', 'Лимит текста AI-запроса, байт UTF-8'),
+        'ai_screen_model': ('text_input', 'Модель первичного разбора'),
+        'ai_deep_model': ('text_input', 'Модель глубокого разбора'),
+        'ai_analysis_stage': ('selectbox', 'Этап AI-разбора'),
+        'ai_prompt_variant': ('selectbox', 'Вариант промпта'),
+        'posts_limit': ('number_input', 'Публикаций для аудита'),
         'dev_mode': ('checkbox', 'Dev-режим'), 'keep_browser_on_error': ('checkbox', 'Оставлять Chrome открытым при ошибке'),
         'browser_wait_seconds': ('number_input', 'Ожидание ручного входа, секунд'),
         'tgstat_profile_id': ('selectbox', 'Профиль TGStat'),
@@ -131,6 +136,7 @@ def last_run_preferences(state):
         'max_audits': ('number_input', 'Максимум аудитов: 0 = десять целей'), 'max_minutes': ('number_input', 'Лимит времени, минут'),
     }
     result = {widget_key(*pair): settings[field] for field, pair in fields.items() if field in settings}
+    result.update({'category_weight_' + key: weight for key, weight in settings.get('category_weights', ())})
     result['tgstat_category_ids'] = list(settings.get('category_ids', []))
     result[widget_key('slider', 'Возраст канала, месяцев')] = [settings.get('min_age_months', 12), settings.get('max_age_months') or 120]
     result[widget_key('slider', 'Уровень вовлечённости ERR, %')] = [settings.get('min_err', 10), settings.get('max_err') or 100]

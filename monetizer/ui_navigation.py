@@ -4,7 +4,7 @@ import streamlit as st
 from .preferences import widget_key
 
 SECTIONS = ['Поиск', 'База кандидатов', 'План контактов', 'История запусков',
-            'Пакет ChatGPT', 'Качество отбора', 'Профили TGStat', 'Dev-диагностика']
+            'Пакет ChatGPT', 'Качество отбора', 'Профили TGStat', 'Инструменты', 'Канбан', 'Аналитика партнёрств', 'Dev-диагностика']
 
 
 def sidebar_navigation(ui):
@@ -16,7 +16,7 @@ def sidebar_navigation(ui):
     with st.sidebar:
         st.title('Монетизатор')
         st.caption('Telegram · рабочее пространство')
-        st.button('На главную — поиск', icon=':material/home:', width='stretch', on_click=home)
+        st.button('На главную — поиск', icon=':material/home:', width='stretch', on_click=home, shortcut='Alt+1')
         with st.expander('Разделы приложения', expanded=False):
             section = ui.radio('Раздел', SECTIONS, label_visibility='collapsed')
         st.caption('Сейчас: ' + section)

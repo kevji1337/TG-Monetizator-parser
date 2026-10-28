@@ -23,9 +23,12 @@ def source_version():
 
 
 def _busy(runner):
+    path = getattr(getattr(runner, 'repo', None), 'path', None)
+    experiment = shared_state().get('experiments', {}).get(str(path.resolve())) if path else None
     with runner.lock:
         return (runner.state['status'] in ('running', 'stopping') or
-                bool(runner.thread and runner.thread.is_alive()))
+                bool(runner.thread and runner.thread.is_alive()) or
+                bool(experiment and not experiment['future'].done()))
 
 
 def _existing_worker(key):

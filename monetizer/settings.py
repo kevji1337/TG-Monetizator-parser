@@ -65,8 +65,24 @@ class Settings:
     ai_max_audits: int = 5
     ai_timeout: int = 600
     ai_prompt_bytes: int = 96000
+    category_weights: tuple = ()
+    force_reaudit: bool = False
+    ai_screen_model: str = ''
+    ai_deep_model: str = ''
+    ai_analysis_stage: str = 'deep'
+    ai_prompt_variant: str = 'baseline'
 
     def __post_init__(self):
+        if self.ai_analysis_stage not in ('screen', 'deep') or self.ai_prompt_variant not in ('baseline', 'strict', 'concise'):
+            raise ValueError('Неверный этап или вариант промпта AI')
+        if any(not isinstance(v, str) or len(v) > 160 for v in (self.ai_screen_model, self.ai_deep_model)):
+            raise ValueError('Model ID: до 160 символов')
+        if type(self.force_reaudit) is not bool:
+            raise ValueError('Повторный аудит должен быть флагом')
+        weights = dict(self.category_weights)
+        if any(not isinstance(k, str) or not k.isascii() or not k.isdigit() or type(v) is not int or not 1 <= v <= 10 for k, v in weights.items()):
+            raise ValueError('Вес тематики: 1–10')
+        object.__setattr__(self, 'category_weights', tuple(sorted(weights.items())))
         if (self.min_avg_view_ratio is not None and
                 (type(self.min_avg_view_ratio) not in (int, float) or not 0 <= self.min_avg_view_ratio <= 100)):
             raise ValueError('Порог средних просмотров: от 0 до 100% подписчиков')

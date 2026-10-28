@@ -27,6 +27,7 @@ from .tgstat_filters import filter_spec
 from .diagnostics import BrowserControl, logger, retained_sessions
 from .ai_audit import ProxyAuditor, apply_assessment, PROMPT_VERSION, QUEUE_VERSION, needs_ai, cache_key, request_data
 from .candidate_insights import ai_priority, priority_key, PRIORITY_VERSION
+from .workspace import Workspace, distribution, topic_stability
 
 RANK = {"top": 0, "recommended": 1, "review": 2, "rejected": 3, "error": 4}
 STOP_LABELS = {"target_reached": "Цель достигнута", "exhausted": "Доступная выдача исчерпана",
@@ -139,6 +140,7 @@ class JobRunner:
             return {**copy.deepcopy(row), 'assessment_stale': False}
         row = qualify(reassess_metrics(row, settings), self.state.get("niche", ""), settings.niche_id,
                       settings.micro_id, settings.category_ids)
+        row.update(view_distribution=distribution(row), topic_stability=topic_stability(row))
         if not row.get("pitch_edited"):
             draft = compose_pitch(row, self.state.get("niche", ""), profile=profile)
             row.update(pitch=draft["message"], pitch_scenario=draft["scenario_id"],
@@ -288,6 +290,8 @@ class JobRunner:
                     queries = [category_key(c) for c in settings.category_ids]
                 queries = unique_queries(queries or [])
                 usernames = list(dict.fromkeys(normalize_username(u) for u in (usernames or [])))
+                blocked = set(Workspace(self.repo).get('blocklist', 'channels', []))
+                usernames = [u for u in usernames if u not in blocked]
                 if not queries and not usernames:
                     raise ValueError("Выберите тематики TGStat или добавьте каналы")
                 if len(queries) > 50:
@@ -325,7 +329,8 @@ class JobRunner:
             if not resume:
                 scope_data = {k: v for k, v in settings.to_dict().items() if k not in (
                     "target_count", "max_audits", "max_minutes", "new_only", "workers", "requests_per_second", "login_wait_seconds", "retries", "connect_timeout", "read_timeout",
-                    'dev_mode', 'keep_browser_on_error', 'browser_wait_seconds', 'tgstat_profile_id', 'tgstat_auto_switch')}
+                    'dev_mode', 'keep_browser_on_error', 'browser_wait_seconds', 'tgstat_profile_id', 'tgstat_auto_switch',
+                    'force_reaudit', 'category_weights')}
                 self.state = {"run_id": uuid4().hex, "settings": settings.to_dict(), "queries": queries,
                               "query_scope": hashlib.sha256(dumps([niche, scope_data, RULE_VERSION, CATALOG_VERSION, CATEGORY_RULES_VERSION]).encode()).hexdigest(),
                               "niche": niche.strip(), "manual": bool(usernames), "rows": [], "logs": [], "paths": [],
@@ -349,7 +354,8 @@ class JobRunner:
             self._api_auditor = ProxyAuditor(self.repo, settings, runtime_key, self.stop_event, self.log) if settings.ai_enabled else None
             # Legacy checkpoints have no page cursor; restart discovery while keeping known candidates.
             done = {r["username"].lstrip("@") for r in self.state["rows"]}
-            self.state["queue"] = [u for u in self.state["candidates"] if u not in done]
+            blocked = set(Workspace(self.repo).get('blocklist', 'channels', []))
+            self.state["queue"] = [u for u in self.state["candidates"] if u not in done and u not in blocked]
             for query in self.state.get("queries", []):
                 self.state.setdefault("query_state", {}).setdefault(query, {"page": 0, "buffer": [], "exhausted": False, "blocked": False, "served": 0})
                 self.state.setdefault("query_stats", {}).setdefault(query, {"found": 0, "duplicates": 0, "seconds": 0, "access_errors": 0})
@@ -387,7 +393,8 @@ class JobRunner:
             return unseen[0]
         def score(q):
             stats, previous = self.state["query_stats"][q], history.get(q, {})
-            return (stats.get("qualified", 0) + previous.get("qualified", 0) + 1) / (stats.get("audited", 0) + previous.get("audited", 0) + 2) + 1 / (1 + self.state["query_state"][q]["served"])
+            weight = dict(self.state.get('settings', {}).get('category_weights', ())).get(category_id_from_key(q), 1) if q.startswith('tgstat:') else 1
+            return weight * ((stats.get("qualified", 0) + previous.get("qualified", 0) + 1) / (stats.get("audited", 0) + previous.get("audited", 0) + 2) + 1 / (1 + self.state["query_state"][q]["served"]))
         return max(available, key=score)
 
     def _discover_portion(self, search, query, excluded):
@@ -524,6 +531,7 @@ class JobRunner:
                 search = ProfileSearch(settings, self.state['tgstat_profiles'], self.stop_event, self.log,
                                        deadline, self.browser_control, self._profile_search_state, search_factory=TGStatSearch)
             excluded = self.repo.processed() if settings.new_only and not self.state.get("manual") else set()
+            excluded |= set(Workspace(self.repo).get('blocklist', 'channels', []))
             history = self.repo.query_history(self.state.get("query_scope", ""), self.state.get("run_id"))
             while True:
                 if self.stop_event.is_set():
@@ -598,7 +606,7 @@ class JobRunner:
                 in_flight = set(pending.values())
                 next_name = next((u for u in self.state['queue'] if u not in in_flight), None)
                 if next_name and len(pending) < settings.workers and len(pending) + len(self.state['rows']) < settings.audit_budget:
-                    cached = self.repo.cached(next_name)
+                    cached = None if settings.force_reaudit else self.repo.cached(next_name)
                     if cached:
                         from concurrent.futures import Future
                         future = Future()
@@ -718,7 +726,8 @@ class JobRunner:
         runtime_key = (api_key or os.environ.get('MONETIZER_AI_KEY', '')).strip()
         if not runtime_key:
             raise ValueError('Введите API-ключ в разделе «AI-аудит Gemini»')
-        allowed = {k: ai_config[k] for k in ('ai_base_url', 'ai_model', 'ai_max_audits', 'ai_timeout', 'ai_prompt_bytes') if k in ai_config}
+        allowed = {k: ai_config[k] for k in ('ai_base_url', 'ai_model', 'ai_max_audits', 'ai_timeout', 'ai_prompt_bytes',
+                    'ai_screen_model', 'ai_deep_model', 'ai_analysis_stage', 'ai_prompt_variant') if k in ai_config}
         with RunGuard(self.repo.path):
             settings = replace(Settings.from_saved(self.state['settings']), ai_enabled=True, **allowed)
             row = next((r for r in self.snapshot()['rows'] if r['username'] == username), None)

@@ -41,6 +41,9 @@ COLUMNS = {
     'activity_observed_at': 'Время замера активности (UTC)',
     'activity_target_age_hours': 'Целевой возраст поста, ч', 'activity_age_tolerance_hours': 'Отклонение возраста поста, ч',
     'activity_evidence': 'Замер активности поста',
+    'view_distribution': 'Распределение просмотров', 'topic_stability': 'Стабильность тематики',
+    'custom_tags': 'Теги', 'custom_collections': 'Подборки', 'deal_stage': 'Этап партнёрства',
+    'partnership_economics': 'Экономика партнёрства',
 }
 
 

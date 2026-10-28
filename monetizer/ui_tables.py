@@ -29,6 +29,9 @@ def candidate_columns(target_age=24):
         'author_contact': st.column_config.TextColumn('Контакт', width=145),
         'next_contact_date': st.column_config.TextColumn('След. контакт', width=125),
         'next_action_label': st.column_config.TextColumn('Действие', width=190),
+        'custom_tags': st.column_config.TextColumn('Теги', width=170),
+        'custom_collections': st.column_config.TextColumn('Подборки', width=170),
+        'deal_stage': st.column_config.TextColumn('Партнёрство', width=150),
     }
     for key, label in [('link', 'Канал ↗'), ('youtube', 'YouTube ↗'), ('instagram', 'Instagram ↗'),
                        ('activity_post_url', 'Пост ↗')]:
@@ -53,4 +56,4 @@ def workspace_columns():
 
 
 def search_locked(state):
-    return state.get('status') in ('running', 'stopping') or bool(state.get('external_owner'))
+    return state.get('status') in ('running', 'stopping') or bool(state.get('external_owner')) or bool(state.get('experiment_active'))

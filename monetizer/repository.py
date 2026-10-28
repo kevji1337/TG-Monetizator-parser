@@ -120,6 +120,8 @@ class Repository:
 
     def enrich_rows(self, rows):
         with self.connect() as db:
+            workspace = {r['id']: json.loads(r['data']) for r in db.execute("SELECT id,data FROM workspace_records WHERE kind='candidate'")} if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='workspace_records'").fetchone() else {}
             stored = {r["username"]: r for r in db.execute("SELECT username,work_status,notes,draft FROM channels")}
             plans = {r['username']: dict(r) for r in db.execute('SELECT * FROM contact_plans')}
             completed = {r['username']: r['completed_at'] for r in db.execute(
@@ -130,6 +132,9 @@ class Repository:
         result = copy.deepcopy(rows)
         for row in result:
             username = normalize_username(row["username"])
+            extra = workspace.get(username, {})
+            row.update(custom_tags=extra.get('tags', []), custom_collections=extra.get('collections', []),
+                       deal_stage=extra.get('deal_stage', 'none'), partnership_economics=extra.get('economics', {}))
             crm = stored.get(username)
             row.update(work_status=crm["work_status"] if crm else "new", notes=crm["notes"] if crm else "")
             row["work_status_label"] = WORK_STATUSES[row["work_status"]]
